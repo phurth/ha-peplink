@@ -1,0 +1,58 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Peplink Router",
+        "description": "Enter the router's address and choose an authentication method.",
+        "data": {
+          "base_url": "Router URL",
+          "instance_name": "Instance Name",
+          "auth_mode": "Authentication Mode"
+        },
+        "data_description": {
+          "base_url": "e.g. http://192.168.1.1",
+          "instance_name": "Display name for this router (e.g. Rockwood Peplink)",
+          "auth_mode": "Username/Password or Client ID/Secret"
+        }
+      },
+      "userpass": {
+        "title": "Username / Password",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "token": {
+        "title": "Client ID / Secret",
+        "data": {
+          "client_id": "Client ID",
+          "client_secret": "Client Secret"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to reach the router. Check the URL and network.",
+      "invalid_auth": "Authentication failed. Check your credentials.",
+      "unknown": "Unexpected error. Check the logs for details."
+    },
+    "abort": {
+      "already_configured": "This router instance is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling Options",
+        "data": {
+          "status_interval": "Status poll interval (seconds)",
+          "usage_interval": "Usage poll interval (seconds)",
+          "diag_interval": "Diagnostics poll interval (seconds)",
+          "enable_vpn": "Enable VPN monitoring",
+          "vpn_interval": "VPN poll interval (seconds)",
+          "enable_gps": "Enable GPS tracking",
+          "gps_interval": "GPS poll interval (seconds)"
+        }
+      }
+    }
+  }
+}
