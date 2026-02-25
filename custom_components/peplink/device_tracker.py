@@ -1,6 +1,7 @@
 """Device tracker platform for Peplink Router GPS.
 
-Only registered when enable_gps=True in options.
+Always forwarded so the platform list is stable across option changes.
+Returns early (no entities) when enable_gps=False.
 Entity name 'Location' matches the Android plugin MQTT discovery name.
 """
 from __future__ import annotations
@@ -12,7 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import CONF_ENABLE_GPS, DOMAIN
 from .coordinator import PeplinkCoordinator
 from .entity import PeplinkEntity
 
@@ -24,7 +25,9 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up GPS device tracker entity."""
+    """Set up GPS device tracker entity (no-op when GPS is disabled)."""
+    if not entry.options.get(CONF_ENABLE_GPS, False):
+        return
     coordinator: PeplinkCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([RouterLocationTracker(coordinator, entry)])
 

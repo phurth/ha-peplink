@@ -7,12 +7,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import CONF_ENABLE_GPS, DOMAIN
+from .const import DOMAIN
 from .coordinator import PeplinkCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["binary_sensor", "button", "select", "sensor"]
+PLATFORMS = ["binary_sensor", "button", "device_tracker", "select", "sensor"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -24,6 +24,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
       3. First coordinator refresh (populates coordinator.data with live values)
       4. Store coordinator
       5. Set up platforms (entities read wan_connections and initial data)
+
+    device_tracker is always forwarded; its async_setup_entry returns early when
+    GPS is disabled so the platform list is stable across option changes.
     """
     coordinator = PeplinkCoordinator(hass, entry)
 
@@ -35,11 +38,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
-    platforms = list(PLATFORMS)
-    if entry.options.get(CONF_ENABLE_GPS, False):
-        platforms.append("device_tracker")
-
-    await hass.config_entries.async_forward_entry_setups(entry, platforms)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
@@ -48,11 +47,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    platforms = list(PLATFORMS)
-    if entry.options.get(CONF_ENABLE_GPS, False):
-        platforms.append("device_tracker")
-
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, platforms)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unload_ok:
         coordinator: PeplinkCoordinator = hass.data[DOMAIN].pop(entry.entry_id)

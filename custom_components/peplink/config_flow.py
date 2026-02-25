@@ -94,9 +94,9 @@ class PeplinkConfigFlow(ConfigFlow, domain=DOMAIN):
             # Quick reachability check before asking for credentials
             try:
                 import aiohttp
-                import asyncio
                 timeout = aiohttp.ClientTimeout(connect=5)
-                async with aiohttp.ClientSession(timeout=timeout) as sess:
+                conn = aiohttp.TCPConnector(ssl=False)
+                async with aiohttp.ClientSession(timeout=timeout, connector=conn) as sess:
                     async with sess.get(base_url) as resp:
                         _ = resp.status   # Just checking reachability
             except Exception:
