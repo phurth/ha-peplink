@@ -1,6 +1,6 @@
 """Constants for the Peplink Router integration."""
 
-DOMAIN = "peplink"
+DOMAIN = "ha_peplink"
 
 # Config entry keys
 CONF_BASE_URL = "base_url"
