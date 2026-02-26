@@ -1,5 +1,5 @@
 {
-  "domain": "ha_peplink",
+  "domain": "peplink",
   "name": "Peplink Router",
   "codeowners": [
     "@phurth"
