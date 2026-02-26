@@ -2,7 +2,7 @@
   "domain": "peplink",
   "name": "Peplink Router",
   "codeowners": [
-    "@petehurth"
+    "@phurth"
   ],
   "config_flow": true,
   "documentation": "https://github.com/phurth/ha-peplink",
