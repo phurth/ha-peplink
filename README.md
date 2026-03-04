@@ -4,6 +4,8 @@ Home Assistant HACS integration for **Peplink / Pepwave routers**.
 
 Polls the router's local REST API to provide real-time WAN status, cellular signal, bandwidth, usage, GPS location, and PepVPN monitoring — plus controls for WAN priority and modem reset.
 
+> **Disclaimer:** This is an independent community integration and is not affiliated with, endorsed by, or supported by Peplink or any of its affiliates. Use it at your own risk.
+
 ## Features
 
 - **Multi-WAN monitoring**: status, IP, uptime, priority, and status LED for every WAN connection
