@@ -35,6 +35,7 @@ from .const import (
     CONF_STATUS_INTERVAL,
     CONF_USAGE_INTERVAL,
     CONF_USERNAME,
+    CONF_VERIFY_SSL,
     CONF_VPN_INTERVAL,
     DEFAULT_DIAG_INTERVAL,
     DEFAULT_GPS_INTERVAL,
@@ -55,6 +56,7 @@ STEP_CONNECTION_SCHEMA = vol.Schema(
         vol.Required(CONF_AUTH_MODE, default=AUTH_MODE_USERPASS): vol.In(
             [AUTH_MODE_USERPASS, AUTH_MODE_TOKEN]
         ),
+        vol.Required(CONF_VERIFY_SSL, default=True): bool,
     }
 )
 
@@ -95,7 +97,7 @@ class PeplinkConfigFlow(ConfigFlow, domain=DOMAIN):
             try:
                 import aiohttp
                 timeout = aiohttp.ClientTimeout(connect=5)
-                conn = aiohttp.TCPConnector(ssl=False)
+                conn = aiohttp.TCPConnector(ssl=user_input[CONF_VERIFY_SSL])
                 async with aiohttp.ClientSession(timeout=timeout, connector=conn) as sess:
                     async with sess.get(base_url) as resp:
                         _ = resp.status   # Just checking reachability
@@ -126,6 +128,7 @@ class PeplinkConfigFlow(ConfigFlow, domain=DOMAIN):
                 auth_mode=AUTH_MODE_USERPASS,
                 username=user_input[CONF_USERNAME],
                 password=user_input[CONF_PASSWORD],
+                verify_ssl=self._connection_data[CONF_VERIFY_SSL],
             )
             try:
                 await client.test_connection()
@@ -173,6 +176,7 @@ class PeplinkConfigFlow(ConfigFlow, domain=DOMAIN):
                 auth_mode=AUTH_MODE_TOKEN,
                 client_id=user_input[CONF_CLIENT_ID],
                 client_secret=user_input[CONF_CLIENT_SECRET],
+                verify_ssl=self._connection_data[CONF_VERIFY_SSL],
             )
             try:
                 await client.test_connection()

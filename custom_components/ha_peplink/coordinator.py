@@ -30,6 +30,7 @@ from .const import (
     CONF_STATUS_INTERVAL,
     CONF_USAGE_INTERVAL,
     CONF_USERNAME,
+    CONF_VERIFY_SSL,
     CONF_VPN_INTERVAL,
     DEFAULT_DIAG_INTERVAL,
     DEFAULT_GPS_INTERVAL,
@@ -76,6 +77,7 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
             password=opts.get(CONF_PASSWORD, ""),
             client_id=opts.get(CONF_CLIENT_ID, ""),
             client_secret=opts.get(CONF_CLIENT_SECRET, ""),
+            verify_ssl=opts.get(CONF_VERIFY_SSL, True),
         )
 
         # --- Polling intervals ---

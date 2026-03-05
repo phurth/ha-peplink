@@ -5,6 +5,7 @@ DOMAIN = "ha_peplink"
 # Config entry keys
 CONF_BASE_URL = "base_url"
 CONF_AUTH_MODE = "auth_mode"
+CONF_VERIFY_SSL = "verify_ssl"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 CONF_CLIENT_ID = "client_id"

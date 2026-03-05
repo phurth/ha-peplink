@@ -62,6 +62,7 @@ class PeplinkApiClient:
         password: str = "",
         client_id: str = "",
         client_secret: str = "",
+        verify_ssl: bool = True,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._auth_mode = auth_mode
@@ -69,6 +70,7 @@ class PeplinkApiClient:
         self._password = password
         self._client_id = client_id
         self._client_secret = client_secret
+        self._verify_ssl = verify_ssl
 
         self._timeout = aiohttp.ClientTimeout(connect=10, sock_read=30, sock_connect=10)
         self._session: aiohttp.ClientSession | None = None
@@ -88,9 +90,11 @@ class PeplinkApiClient:
     def _session_obj(self) -> aiohttp.ClientSession:
         """Return (or create) the underlying aiohttp session."""
         if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(ssl=self._verify_ssl)
             self._session = aiohttp.ClientSession(
                 cookie_jar=aiohttp.DummyCookieJar(),  # Manage cookies manually
                 timeout=self._timeout,
+                connector=connector,
             )
         return self._session
 
