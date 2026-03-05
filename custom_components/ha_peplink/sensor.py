@@ -96,7 +96,8 @@ async def async_setup_entry(
             GpsSpeedSensor(coordinator, entry),
             GpsAltitudeSensor(coordinator, entry),
             GpsHeadingSensor(coordinator, entry),
-            GpsCoordinatesSensor(coordinator, entry),
+            GpsLatitudeSensor(coordinator, entry),
+            GpsLongitudeSensor(coordinator, entry),
         ]
 
     async_add_entities(entities)
@@ -761,6 +762,7 @@ class VpnStatusSensor(PeplinkEntity, SensorEntity):
 class GpsSpeedSensor(PeplinkEntity, SensorEntity):
     """GPS speed in m/s. Name: 'GPS Speed'."""
 
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_name = "GPS Speed"
     _attr_device_class = SensorDeviceClass.SPEED
     _attr_native_unit_of_measurement = UnitOfSpeed.METERS_PER_SECOND
@@ -781,6 +783,7 @@ class GpsSpeedSensor(PeplinkEntity, SensorEntity):
 class GpsAltitudeSensor(PeplinkEntity, SensorEntity):
     """GPS altitude in metres. Name: 'GPS Altitude'."""
 
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_name = "GPS Altitude"
     _attr_native_unit_of_measurement = "m"
     _attr_device_class = SensorDeviceClass.DISTANCE
@@ -801,6 +804,7 @@ class GpsAltitudeSensor(PeplinkEntity, SensorEntity):
 class GpsHeadingSensor(PeplinkEntity, SensorEntity):
     """GPS heading in degrees. Name: 'GPS Heading'."""
 
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_name = "GPS Heading"
     _attr_native_unit_of_measurement = "°"
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -817,21 +821,47 @@ class GpsHeadingSensor(PeplinkEntity, SensorEntity):
         return self.coordinator.data.location.heading
 
 
-class GpsCoordinatesSensor(PeplinkEntity, SensorEntity):
-    """GPS coordinates as readable 'lat, lon' string. Name: 'GPS Coordinates'."""
+class GpsLatitudeSensor(PeplinkEntity, SensorEntity):
+    """GPS latitude in decimal degrees. Name: 'GPS Latitude'."""
 
-    _attr_name = "GPS Coordinates"
-    _attr_icon = "mdi:map-marker"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_name = "GPS Latitude"
+    _attr_native_unit_of_measurement = "°"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:latitude"
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_gps_coordinates"
+        self._attr_unique_id = f"{entry.entry_id}_gps_latitude"
 
     @property
-    def native_value(self) -> str | None:
+    def native_value(self) -> float | None:
         if self.coordinator.data is None or self.coordinator.data.location is None:
             return None
         loc = self.coordinator.data.location
         if not loc.has_valid_fix:
             return None
-        return f"{loc.latitude:.6f}, {loc.longitude:.6f}"
+        return round(loc.latitude, 6) if loc.latitude is not None else None
+
+
+class GpsLongitudeSensor(PeplinkEntity, SensorEntity):
+    """GPS longitude in decimal degrees. Name: 'GPS Longitude'."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_name = "GPS Longitude"
+    _attr_native_unit_of_measurement = "°"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:longitude"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_gps_longitude"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None or self.coordinator.data.location is None:
+            return None
+        loc = self.coordinator.data.location
+        if not loc.has_valid_fix:
+            return None
+        return round(loc.longitude, 6) if loc.longitude is not None else None

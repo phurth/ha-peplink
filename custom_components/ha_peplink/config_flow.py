@@ -97,11 +97,13 @@ class PeplinkConfigFlow(ConfigFlow, domain=DOMAIN):
             try:
                 import aiohttp
                 timeout = aiohttp.ClientTimeout(connect=5)
-                conn = aiohttp.TCPConnector(ssl=user_input[CONF_VERIFY_SSL])
+                ssl_param: bool | None = None if user_input[CONF_VERIFY_SSL] else False
+                conn = aiohttp.TCPConnector(ssl=ssl_param)
                 async with aiohttp.ClientSession(timeout=timeout, connector=conn) as sess:
                     async with sess.get(base_url) as resp:
                         _ = resp.status   # Just checking reachability
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.debug("Reachability check failed for %s: %s", base_url, exc)
                 errors["base"] = "cannot_connect"
             else:
                 self._connection_data = dict(user_input)

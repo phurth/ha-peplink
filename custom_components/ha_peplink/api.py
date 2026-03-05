@@ -77,6 +77,7 @@ class PeplinkApiClient:
 
         # USERPASS auth state
         self._auth_cookie: str | None = None
+        self._auth_cookie_name: str = "bauth"   # bauth=HTTPS, pauth=HTTP
         self._is_connected: bool = False
 
         # TOKEN auth state
@@ -90,7 +91,10 @@ class PeplinkApiClient:
     def _session_obj(self) -> aiohttp.ClientSession:
         """Return (or create) the underlying aiohttp session."""
         if self._session is None or self._session.closed:
-            connector = aiohttp.TCPConnector(ssl=self._verify_ssl)
+            # ssl=False disables cert verification; ssl=None uses the default
+            # context (verification enabled). ssl=True is NOT a valid value.
+            ssl_param: bool | None = None if self._verify_ssl else False
+            connector = aiohttp.TCPConnector(ssl=ssl_param)
             self._session = aiohttp.ClientSession(
                 cookie_jar=aiohttp.DummyCookieJar(),  # Manage cookies manually
                 timeout=self._timeout,
@@ -134,7 +138,7 @@ class PeplinkApiClient:
                 await self._grant_token()
 
     async def _login(self) -> None:
-        """POST /api/login, extract pauth cookie. Port of PeplinkApiClient.login()."""
+        """POST /api/login, extract session cookie. Port of PeplinkApiClient.login().\n\n        Peplink sets 'bauth' over HTTPS and 'pauth' over plain HTTP.\n        Both are stored and replayed on subsequent requests.\n        """
         url = f"{self._base_url}/api/login"
         payload = {
             "username": self._username,
@@ -162,23 +166,31 @@ class PeplinkApiClient:
                     self._is_connected = False
                     raise PeplinkAuthError(f"Login failed: {body.get('message', 'unknown error')}")
 
-                # Extract pauth cookie from Set-Cookie response header
-                # Format: "pauth=VALUE; HttpOnly; SameSite=Strict"
-                pauth: str | None = None
+                # Extract session cookie from Set-Cookie response header.
+                # Peplink uses "bauth" over HTTPS and "pauth" over plain HTTP.
+                # Format: "bauth=VALUE; HttpOnly; SameSite=Strict"
+                session_cookie: str | None = None
+                session_cookie_name: str = "bauth"
                 for hdr in resp.headers.getall("Set-Cookie", []):
                     for part in hdr.split(";"):
                         part = part.strip()
-                        if part.startswith("pauth="):
-                            pauth = part[6:]
+                        if part.startswith("bauth="):
+                            session_cookie = part[6:]
+                            session_cookie_name = "bauth"
                             break
-                    if pauth:
+                        if part.startswith("pauth="):
+                            session_cookie = part[6:]
+                            session_cookie_name = "pauth"
+                            break
+                    if session_cookie:
                         break
 
-                if not pauth:
+                if not session_cookie:
                     self._is_connected = False
-                    raise PeplinkAuthError("Login failed: no pauth cookie in response")
+                    raise PeplinkAuthError("Login failed: no session cookie (bauth/pauth) in response")
 
-                self._auth_cookie = pauth
+                self._auth_cookie = session_cookie
+                self._auth_cookie_name = session_cookie_name
                 self._is_connected = True
                 _LOGGER.debug("Login successful (cookie obtained)")
 
@@ -247,9 +259,13 @@ class PeplinkApiClient:
         return url
 
     def _auth_headers(self) -> dict[str, str]:
-        """Return auth headers for userpass mode (cookie injection)."""
+        """Return auth headers for userpass mode (cookie injection).
+
+        Peplink uses 'bauth' over HTTPS and 'pauth' over plain HTTP.
+        We store whichever was returned and inject it as-is.
+        """
         if self._auth_mode == AUTH_MODE_USERPASS and self._auth_cookie:
-            return {"Cookie": f"pauth={self._auth_cookie}"}
+            return {"Cookie": f"{self._auth_cookie_name}={self._auth_cookie}"}
         return {}
 
     async def _request(
