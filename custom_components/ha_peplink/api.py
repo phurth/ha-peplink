@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -327,11 +328,15 @@ class PeplinkApiClient:
 
     # ===== API METHODS =====
 
-    async def get_wan_status(
-        self, conn_ids: str = "1 2 3 4 5 6 7 8 9 10"
-    ) -> dict[int, WanConnection]:
-        """GET /api/status.wan.connection?id=...  Port of getWanStatus()."""
-        path = f"/api/status.wan.connection?id={conn_ids}"
+    async def get_wan_status(self, conn_ids: str | None = None) -> dict[int, WanConnection]:
+        """GET /api/status.wan.connection (optionally filtered by id list).
+
+        Port of getWanStatus(). When conn_ids is provided, request includes
+        ?id={space-separated ids}; otherwise the API default set is returned.
+        """
+        path = "/api/status.wan.connection"
+        if conn_ids:
+            path = f"{path}?id={conn_ids}"
         data = await self._request("GET", path)
 
         if data.get("stat") != "ok":
@@ -340,7 +345,7 @@ class PeplinkApiClient:
         response = data.get("response", {})
         connections: dict[int, WanConnection] = {}
         for key, conn_data in response.items():
-            conn_id = _to_int(key)
+            conn_id = _parse_conn_id_key(key)
             if conn_id is not None and isinstance(conn_data, dict):
                 connections[conn_id] = _parse_wan_connection(conn_id, conn_data)
 
@@ -356,7 +361,7 @@ class PeplinkApiClient:
         response = data.get("response", {})
         usage: dict[int, WanUsage] = {}
         for key, conn_data in response.items():
-            conn_id = _to_int(key)
+            conn_id = _parse_conn_id_key(key)
             if conn_id is not None and isinstance(conn_data, dict):
                 usage[conn_id] = _parse_wan_usage(conn_id, conn_data)
 
@@ -552,7 +557,7 @@ class PeplinkApiClient:
 
         result: dict[int, tuple[float, float]] = {}
         for key, conn_data in bandwidth.items():
-            conn_id = _to_int(key)
+            conn_id = _parse_conn_id_key(key)
             if conn_id is None or not isinstance(conn_data, dict):
                 continue
             overall = conn_data.get("overall", {})
@@ -627,6 +632,21 @@ def _to_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_conn_id_key(value: Any) -> int | None:
+    """Parse WAN connection ID keys.
+
+    Normally keys are numeric strings (e.g. "5"). Some firmware variants can
+    return prefixed keys (e.g. "vwan5"); in that case, use the first number.
+    """
+    parsed = _to_int(value)
+    if parsed is not None:
+        return parsed
+    if not isinstance(value, str):
+        return None
+    match = re.search(r"\d+", value)
+    return int(match.group(0)) if match else None
 
 
 def _parse_wan_connection(conn_id: int, data: dict) -> WanConnection:

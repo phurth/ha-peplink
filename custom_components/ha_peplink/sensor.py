@@ -57,8 +57,10 @@ async def async_setup_entry(
         if wan.sim_slot_count > 1:
             for slot_id in range(1, wan.sim_slot_count + 1):
                 entities.append(SimUsageSensor(coordinator, entry, conn_id, slot_id))
+                entities.append(SimUsagePercentSensor(coordinator, entry, conn_id, slot_id))
         else:
             entities.append(WanUsageSensor(coordinator, entry, conn_id))
+            entities.append(WanUsagePercentSensor(coordinator, entry, conn_id))
 
         # Cellular-specific sensors
         if wan.wan_type == WAN_TYPE_CELLULAR:
@@ -429,6 +431,70 @@ class SimUsageSensor(PeplinkWanEntity, SensorEntity):
             "percent_used": percent,
             "start_day": start,
         }
+
+
+class WanUsagePercentSensor(PeplinkWanEntity, SensorEntity):
+    """WAN usage percentage for single-SIM / non-cellular WANs.
+
+    Name: '{wan.name} Usage Percent'.
+    """
+
+    _attr_native_unit_of_measurement = "%"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:percent"
+
+    def __init__(self, coordinator, entry, conn_id):
+        super().__init__(coordinator, entry, conn_id)
+        self._attr_unique_id = f"{entry.entry_id}_wan{conn_id}_usage_percent"
+
+    @property
+    def name(self) -> str:
+        wan = self.coordinator.wan_connections.get(self._conn_id)
+        return f"{wan.name} Usage Percent" if wan else f"WAN {self._conn_id} Usage Percent"
+
+    @property
+    def native_value(self) -> int | None:
+        if self.coordinator.data is None:
+            return None
+        usage = self.coordinator.data.wan_usage.get(self._conn_id)
+        if usage is None:
+            return None
+        return usage.percent or _compute_usage_percent(usage.usage_mb, usage.limit_mb)
+
+
+class SimUsagePercentSensor(PeplinkWanEntity, SensorEntity):
+    """Per-SIM usage percentage for multi-SIM cellular connections.
+
+    Name: '{wan.name} {slot_name} Usage Percent'.
+    """
+
+    _attr_native_unit_of_measurement = "%"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:percent"
+
+    def __init__(self, coordinator, entry, conn_id, slot_id: int):
+        super().__init__(coordinator, entry, conn_id)
+        self._slot_id = slot_id
+        self._slot_name = SIM_SLOT_NAMES.get(slot_id, f"SIM {slot_id}")
+        self._attr_unique_id = f"{entry.entry_id}_wan{conn_id}_sim{slot_id}_usage_percent"
+
+    @property
+    def name(self) -> str:
+        wan = self.coordinator.wan_connections.get(self._conn_id)
+        base = wan.name if wan else f"WAN {self._conn_id}"
+        return f"{base} {self._slot_name} Usage Percent"
+
+    @property
+    def native_value(self) -> int | None:
+        if self.coordinator.data is None:
+            return None
+        usage = self.coordinator.data.wan_usage.get(self._conn_id)
+        if usage is None or usage.sim_slots is None:
+            return None
+        slot = usage.sim_slots.get(self._slot_id)
+        if slot is None or not slot.enabled or not slot.has_usage_tracking:
+            return None
+        return slot.percent or _compute_usage_percent(slot.usage_mb, slot.limit_mb)
 
 
 # ===== CELLULAR-SPECIFIC SENSORS =====

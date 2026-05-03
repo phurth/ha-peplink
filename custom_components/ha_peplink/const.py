@@ -62,8 +62,10 @@ SIM_SLOT_NAMES = {
 }
 MAX_SIM_SLOTS = 5
 
-# WAN IDs to probe during discovery (match PeplinkDiscovery.kt)
-WAN_DISCOVERY_IDS = list(range(1, 11))
+# WAN IDs to probe during discovery.
+# The legacy plugin used 1-10, but some routers expose additional/virtual WANs
+# (including vWAN) at higher numeric IDs.
+WAN_DISCOVERY_IDS = list(range(1, 33))
 
 # Token lifetime in seconds (46 hours, match TOKEN_REFRESH_INTERVAL_MS in PeplinkApiClient.kt)
 TOKEN_REFRESH_SECS = 46 * 60 * 60

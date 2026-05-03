@@ -39,6 +39,7 @@ from .const import (
     DEFAULT_VPN_INTERVAL,
     DOMAIN,
     MAX_SIM_SLOTS,
+    WAN_DISCOVERY_IDS,
     WAN_TYPE_CELLULAR,
 )
 from .models import (
@@ -115,20 +116,40 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
         # vpn_profiles from discovery (used to create entities at setup)
         self.vpn_profiles_at_discovery: dict[str, VpnProfile] = {}
 
+    @staticmethod
+    def _build_discovery_id_query() -> str:
+        """Build the WAN ID probe list used during discovery/polling."""
+        return " ".join(str(conn_id) for conn_id in WAN_DISCOVERY_IDS)
+
     # ===== HARDWARE DISCOVERY =====
 
     async def async_discover_hardware(self) -> None:
-        """Query WAN IDs 1-10, keep responding ones. Mark cellular sim_slot_count=5.
+        """Probe configured WAN IDs, keep responding ones, and enrich cellular SIM slots.
 
         Port of PeplinkDiscovery.discoverHardware().
         Must be called during async_setup_entry before platforms are set up.
         Raises ConfigEntryNotReady on failure.
         """
         _LOGGER.info("Starting Peplink hardware discovery")
+        probe_ids = self._build_discovery_id_query()
         try:
-            wan_connections = await self.api.get_wan_status("1 2 3 4 5 6 7 8 9 10")
+            wan_connections = await self.api.get_wan_status(probe_ids)
         except (PeplinkAuthError, PeplinkConnectionError, PeplinkApiError) as err:
             raise ConfigEntryNotReady(f"Hardware discovery failed: {err}") from err
+
+        # Some firmware variants expose virtual WAN IDs outside the default probe
+        # range. If we found no WANs, retry once without an explicit id filter.
+        if not wan_connections:
+            try:
+                wan_connections = await self.api.get_wan_status()
+                if wan_connections:
+                    _LOGGER.info(
+                        "Hardware discovery fallback succeeded without ID filter (%d WANs)",
+                        len(wan_connections),
+                    )
+            except (PeplinkAuthError, PeplinkConnectionError, PeplinkApiError):
+                # Keep the original empty result and proceed to existing error path.
+                pass
 
         # Mark all cellular connections with 5 SIM slots (per enrichCellularWithSimSlots)
         for conn_id, conn in wan_connections.items():
@@ -177,7 +198,11 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
 
         # --- Always: status poll (bandwidth comes from diag poll below) ---
         try:
-            new_wan = await self.api.get_wan_status("1 2 3 4 5 6 7 8 9 10")
+            if self.wan_connections:
+                conn_ids = " ".join(str(conn_id) for conn_id in sorted(self.wan_connections))
+            else:
+                conn_ids = self._build_discovery_id_query()
+            new_wan = await self.api.get_wan_status(conn_ids)
             self._api_connected = True
             self._authenticated = self.api.is_authenticated()
             self._data_healthy = len(new_wan) > 0
