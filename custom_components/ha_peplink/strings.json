@@ -28,17 +28,29 @@
         "title": "Client ID / Secret",
         "data": {
           "client_id": "Client ID",
-          "client_secret": "Client Secret"
+          "client_secret": "Client Secret",
+          "username": "Admin username (optional — for SpeedFusion Connect & diagnostics)",
+          "password": "Admin password (optional)"
+        }
+      },
+      "reconfigure": {
+        "title": "Admin credentials (SpeedFusion Connect & diagnostics)",
+        "description": "Add the router's local admin username/password to enable SpeedFusion Connect data and thermal/fan diagnostics. These use the web-admin session, which token auth alone can't reach. Leave blank to remove.",
+        "data": {
+          "username": "Admin username",
+          "password": "Admin password"
         }
       }
     },
     "error": {
       "cannot_connect": "Unable to reach the router. Check the URL and network.",
       "invalid_auth": "Authentication failed. Check your credentials.",
-      "unknown": "Unexpected error. Check the logs for details."
+      "unknown": "Unexpected error. Check the logs for details.",
+      "invalid_admin_auth": "Admin login failed — check the username/password."
     },
     "abort": {
-      "already_configured": "This router instance is already configured."
+      "already_configured": "This router instance is already configured.",
+      "reconfigure_successful": "Credentials updated."
     }
   },
   "options": {

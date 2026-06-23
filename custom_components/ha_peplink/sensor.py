@@ -7,15 +7,23 @@ HA generates entity_ids like:
 """
 from __future__ import annotations
 
+import datetime
 import logging
 import math
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfDataRate, UnitOfSpeed, UnitOfTemperature
+from homeassistant.const import (
+    EntityCategory,
+    UnitOfDataRate,
+    UnitOfInformation,
+    UnitOfSpeed,
+    UnitOfTemperature,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_ENABLE_GPS,
@@ -85,6 +93,16 @@ async def async_setup_entry(
         entities += [
             FanSpeedSensor(coordinator, entry, fan_id),
             FanStatusSensor(coordinator, entry, fan_id),
+        ]
+
+    # SpeedFusion Connect sensors — only on devices with an active SFC profile.
+    # (Requires admin credentials for the web-admin session; reconfiguring the
+    # entry to add them reloads it, re-running this gate.)
+    sfc = coordinator.data.sfc if coordinator.data is not None else None
+    if sfc is not None and sfc.has_profile:
+        entities += [
+            SfcDataAllowanceSensor(coordinator, entry),
+            SfcRenewalDateSensor(coordinator, entry),
         ]
 
     # VPN sensors (when enabled; profiles discovered at setup)
@@ -669,6 +687,86 @@ class SystemTemperatureSensor(PeplinkEntity, SensorEntity):
             return None
         t = self.coordinator.data.diagnostics.temperature
         return round(t, 1) if t is not None else None
+
+
+class SfcDataAllowanceSensor(PeplinkEntity, SensorEntity):
+    """Remaining SpeedFusion Connect data allowance, in GB.
+
+    Source: support_sfwan_quota_mb (MB) from the web-admin vars blob.
+    """
+
+    _attr_name = "SpeedFusion Connect Data Remaining"
+    _attr_device_class = SensorDeviceClass.DATA_SIZE
+    _attr_native_unit_of_measurement = UnitOfInformation.GIGABYTES
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+    _attr_icon = "mdi:cloud-arrow-down-outline"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_sfc_data_remaining"
+
+    @property
+    def _sfc(self):
+        return self.coordinator.data.sfc if self.coordinator.data is not None else None
+
+    @property
+    def native_value(self) -> float | None:
+        sfc = self._sfc
+        if sfc is None or sfc.quota_mb is None:
+            return None
+        return round(sfc.quota_mb / 1024, 2)
+
+    @property
+    def available(self) -> bool:
+        sfc = self._sfc
+        return super().available and sfc is not None and sfc.quota_mb is not None
+
+
+class SfcRenewalDateSensor(PeplinkEntity, SensorEntity):
+    """SpeedFusion Connect data-allowance renewal/expiry date.
+
+    Source: support_sfwan_expiry (unix timestamp) from the web-admin vars blob.
+    Uses the DATE device class (not TIMESTAMP) so the frontend shows an absolute
+    localised date rather than a relative "in N days" string. The timestamp is
+    rendered in Home Assistant's configured timezone (matching the router's own
+    UI when HA and the router share a timezone).
+    """
+
+    _attr_name = "SpeedFusion Connect Renewal Date"
+    _attr_device_class = SensorDeviceClass.DATE
+    _attr_icon = "mdi:calendar-refresh"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_sfc_renewal_date"
+
+    @property
+    def _sfc(self):
+        return self.coordinator.data.sfc if self.coordinator.data is not None else None
+
+    @property
+    def native_value(self) -> datetime.date | None:
+        sfc = self._sfc
+        if sfc is None or sfc.expiry is None:
+            return None
+        utc_dt = datetime.datetime.fromtimestamp(sfc.expiry, tz=datetime.timezone.utc)
+        return dt_util.as_local(utc_dt).date()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        sfc = self._sfc
+        if sfc is None:
+            return None
+        return {
+            "router_text": sfc.expiry_date,   # router's own formatted string
+            "timestamp": sfc.expiry,          # raw unix timestamp (UTC)
+        }
+
+    @property
+    def available(self) -> bool:
+        sfc = self._sfc
+        return super().available and sfc is not None and sfc.expiry is not None
 
 
 class TemperatureThresholdSensor(PeplinkEntity, SensorEntity):

@@ -106,6 +106,20 @@ class DeviceInfo:
     hardware_version: str | None = None
 
 
+# ===== SPEEDFUSION CONNECT =====
+
+@dataclass
+class SfcQuota:
+    """SpeedFusion Connect data allowance, parsed from the web-admin vars blob
+    (/cgi-bin/MANGA/index.cgi?mode=js). Not available via the REST API."""
+    has_profile: bool = False
+    quota_mb: int | None = None        # Remaining SFC data allowance, MB
+    expiry: int | None = None          # Renewal/expiry, unix timestamp (UTC)
+    expiry_date: str | None = None     # Human-readable form from the router
+    limit: int | None = None           # Max concurrent SFC connections
+    license_valid: bool = False
+
+
 # ===== VPN =====
 
 @dataclass
@@ -150,6 +164,7 @@ class PeplinkData:
     traffic_stats: dict[int, tuple[float, float]]       # Diag poll: connId->(dl_mbps, ul_mbps)
     vpn_profiles: dict[str, VpnProfile]                 # VPN poll (60s, opt-in)
     location: LocationInfo | None                       # GPS poll (120s, opt-in)
+    sfc: SfcQuota | None = None                         # SpeedFusion Connect (diag poll, web-admin)
     api_connected: bool = True
     authenticated: bool = True
     data_healthy: bool = True

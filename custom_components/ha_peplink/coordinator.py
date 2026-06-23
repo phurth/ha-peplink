@@ -102,6 +102,7 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
         self._firmware_version: str | None = None
         self._connected_devices: int | None = None
         self._traffic_stats: dict[int, tuple[float, float]] = {}
+        self._sfc = None
         self._vpn_profiles: dict[str, VpnProfile] = {}
         self._location = None
 
@@ -270,6 +271,7 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
             traffic_stats=self._traffic_stats,
             vpn_profiles=self._vpn_profiles,
             location=self._location,
+            sfc=self._sfc,
             api_connected=self._api_connected,
             authenticated=self._authenticated,
             data_healthy=self._data_healthy,
@@ -317,6 +319,12 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
             self._traffic_stats = await self.api.get_traffic_stats()
         except Exception as err:
             _LOGGER.warning("Traffic stats poll failed: %s", err)
+
+        # SpeedFusion Connect quota (web-admin vars; needs admin credentials)
+        try:
+            self._sfc = await self.api.get_sfc_quota()
+        except Exception as err:
+            _LOGGER.warning("SFC quota poll failed: %s", err)
 
         _LOGGER.debug("Diagnostics poll successful")
 

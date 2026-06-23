@@ -36,6 +36,11 @@ async def async_setup_entry(
         DataHealthySensor(coordinator, entry),
     ]
 
+    # SpeedFusion Connect (only when an SFC profile is active)
+    sfc = coordinator.data.sfc if coordinator.data is not None else None
+    if sfc is not None and sfc.has_profile:
+        entities.append(SfcLicenseValidSensor(coordinator, entry))
+
     async_add_entities(entities)
 
 
@@ -95,6 +100,25 @@ class AuthenticatedSensor(PeplinkEntity, BinarySensorEntity):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.authenticated
+
+
+class SfcLicenseValidSensor(PeplinkEntity, BinarySensorEntity):
+    """SpeedFusion Connect license validity. Name: 'SpeedFusion Connect License Valid'."""
+
+    _attr_name = "SpeedFusion Connect License Valid"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:license"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_sfc_license_valid"
+
+    @property
+    def is_on(self) -> bool | None:
+        data = self.coordinator.data
+        if data is None or data.sfc is None:
+            return None
+        return data.sfc.license_valid
 
 
 class DataHealthySensor(PeplinkEntity, BinarySensorEntity):

@@ -71,6 +71,11 @@ STEP_TOKEN_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_CLIENT_ID): str,
         vol.Required(CONF_CLIENT_SECRET): str,
+        # Optional local admin credentials — token auth alone cannot reach the
+        # web-admin (/cgi-bin/MANGA/*) endpoints used for SpeedFusion Connect data
+        # and thermal/fan diagnostics. Supply these to enable those entities.
+        vol.Optional(CONF_USERNAME, default=""): str,
+        vol.Optional(CONF_PASSWORD, default=""): str,
     }
 )
 
@@ -198,6 +203,10 @@ class PeplinkConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_CLIENT_ID: user_input[CONF_CLIENT_ID],
                     CONF_CLIENT_SECRET: user_input[CONF_CLIENT_SECRET],
                 }
+                # Optional admin creds for the web-admin (SFC / diagnostics) session.
+                if user_input.get(CONF_USERNAME):
+                    entry_data[CONF_USERNAME] = user_input[CONF_USERNAME]
+                    entry_data[CONF_PASSWORD] = user_input.get(CONF_PASSWORD, "")
                 instance_name = self._connection_data[CONF_INSTANCE_NAME]
                 await self.async_set_unique_id(
                     f"{DOMAIN}_{instance_name.lower().replace(' ', '_')}"
@@ -211,6 +220,65 @@ class PeplinkConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="token",
             data_schema=STEP_TOKEN_SCHEMA,
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Reconfigure — add/update the local admin username/password.
+
+        Token auth alone can't reach the web-admin (/cgi-bin/MANGA/*) endpoints,
+        so this lets a user add admin credentials to an existing entry (commonly
+        a token entry) to enable the SpeedFusion Connect data + thermal/fan
+        diagnostics entities, without deleting and re-adding it.
+        """
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            new_data = {**entry.data}
+            username = (user_input.get(CONF_USERNAME) or "").strip()
+            password = user_input.get(CONF_PASSWORD, "")
+
+            if username:
+                client = PeplinkApiClient(
+                    base_url=new_data[CONF_BASE_URL],
+                    auth_mode=new_data.get(CONF_AUTH_MODE, AUTH_MODE_USERPASS),
+                    username=username,
+                    password=password,
+                    verify_ssl=new_data.get(CONF_VERIFY_SSL, True),
+                )
+                try:
+                    ok = await client.test_web_login()
+                except Exception:  # noqa: BLE001
+                    ok = False
+                finally:
+                    await client.close()
+                if ok:
+                    new_data[CONF_USERNAME] = username
+                    new_data[CONF_PASSWORD] = password
+                else:
+                    errors["base"] = "invalid_admin_auth"
+            elif new_data.get(CONF_AUTH_MODE) != AUTH_MODE_USERPASS:
+                # Cleared — drop the optional admin creds (not for userpass auth,
+                # where they are the primary credential).
+                new_data.pop(CONF_USERNAME, None)
+                new_data.pop(CONF_PASSWORD, None)
+
+            if not errors:
+                return self.async_update_reload_and_abort(entry, data=new_data)
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_USERNAME, default=entry.data.get(CONF_USERNAME, "")
+                    ): str,
+                    vol.Optional(CONF_PASSWORD, default=""): str,
+                }
+            ),
             errors=errors,
         )
 

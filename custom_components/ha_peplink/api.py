@@ -25,6 +25,7 @@ from .models import (
     DeviceInfo,
     FanInfo,
     LocationInfo,
+    SfcQuota,
     SimSlotInfo,
     SystemDiagnostics,
     WanConnection,
@@ -86,6 +87,16 @@ class PeplinkApiClient:
         self._token_expires_at: float = 0.0   # time.monotonic() seconds
 
         self._auth_lock = asyncio.Lock()
+
+        # Web-admin (MANGA) session state — SEPARATE from the REST auth above.
+        # The /cgi-bin/MANGA/* endpoints (system diagnostics, SpeedFusion Connect
+        # vars) reject the REST token AND the /api/login cookie; they require the
+        # web-admin browser session obtained via api.cgi?func=login (a username
+        # and password).  Kept independent so token-mode entries can still reach
+        # these endpoints when admin credentials are supplied.
+        self._web_cookie: str | None = None
+        self._web_cookie_name: str = "bauth"   # bauth=HTTPS, pauth=HTTP
+        self._web_lock = asyncio.Lock()
 
     # ===== SESSION MANAGEMENT =====
 
@@ -326,6 +337,91 @@ class PeplinkApiClient:
 
         raise PeplinkAuthError("Authentication failed after retry")
 
+    # ===== WEB-ADMIN (MANGA) SESSION =====
+
+    async def _web_login(self) -> bool:
+        """Establish a web-admin session cookie via api.cgi?func=login.
+
+        The /cgi-bin/MANGA/* endpoints require the web-admin browser session,
+        which is distinct from the REST /api/login session and the bearer token,
+        so we log in separately here.  Requires a username/password; returns True
+        if a session cookie was obtained.
+        """
+        if not self._username or not self._password:
+            return False
+        url = f"{self._base_url}/cgi-bin/MANGA/api.cgi?func=login"
+        cookie: str | None = None
+        name = "bauth"
+        try:
+            async with self._session_obj().post(
+                url, json={"username": self._username, "password": self._password}
+            ) as resp:
+                for hdr in resp.headers.getall("Set-Cookie", []):
+                    for part in hdr.split(";"):
+                        part = part.strip()
+                        if part.startswith("bauth="):
+                            cookie, name = part[6:], "bauth"
+                        elif part.startswith("pauth="):
+                            cookie, name = part[6:], "pauth"
+                    if cookie:
+                        break
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            _LOGGER.debug("Web-admin login failed: %s", err)
+            self._web_cookie = None
+            return False
+
+        if cookie:
+            self._web_cookie = cookie
+            self._web_cookie_name = name
+            _LOGGER.debug("Web-admin session established (cookie=%s)", name)
+            return True
+        self._web_cookie = None
+        return False
+
+    async def _manga_get(self, path: str) -> Any | None:
+        """GET a /cgi-bin/MANGA/* endpoint using the web-admin cookie session.
+
+        Logs in (api.cgi?func=login) if needed and re-logs-in once on an
+        Unauthorized response.  Returns parsed JSON when the body is JSON, the
+        raw text otherwise (e.g. the index.cgi?mode=js vars blob), or None when
+        no web credentials are configured or auth ultimately fails.
+        """
+        async with self._web_lock:
+            if self._web_cookie is None and not await self._web_login():
+                return None
+            for attempt in range(2):
+                url = f"{self._base_url}{path}"
+                headers = {"Cookie": f"{self._web_cookie_name}={self._web_cookie}"}
+                try:
+                    async with self._session_obj().get(url, headers=headers) as resp:
+                        text = await resp.text()
+                        status = resp.status
+                except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                    raise PeplinkConnectionError(f"MANGA request failed: {err}") from err
+
+                # Web session expired -> body "// Unauthorized" or API-level 401.
+                stale = status == 401 or text.lstrip().startswith("// Unauthorized")
+                if not stale:
+                    try:
+                        parsed = json.loads(text)
+                    except ValueError:
+                        return text   # non-JSON, e.g. the JS vars blob
+                    if (
+                        isinstance(parsed, dict)
+                        and parsed.get("stat") == "fail"
+                        and parsed.get("code") == 401
+                    ):
+                        stale = True
+                    else:
+                        return parsed
+
+                # Stale session — drop the cookie and re-login once.
+                self._web_cookie = None
+                if attempt == 0 and await self._web_login():
+                    continue
+                return None
+        return None
+
     # ===== API METHODS =====
 
     async def get_wan_status(self, conn_ids: str | None = None) -> dict[int, WanConnection]:
@@ -462,8 +558,8 @@ class PeplinkApiClient:
         """
         path = "/cgi-bin/MANGA/api.cgi?func=status.system.info&infoType=thermalSensor%20fanSpeed"
         try:
-            data = await self._request("GET", path)
-        except (PeplinkConnectionError, PeplinkApiError):
+            data = await self._manga_get(path)
+        except PeplinkConnectionError:
             return SystemDiagnostics(temperature=None, temperature_threshold=None)
 
         if not isinstance(data, dict) or data.get("stat") != "ok":
@@ -514,8 +610,8 @@ class PeplinkApiClient:
         """
         path = "/cgi-bin/MANGA/api.cgi?func=status.system.info&infoType=device"
         try:
-            data = await self._request("GET", path)
-        except (PeplinkConnectionError, PeplinkApiError):
+            data = await self._manga_get(path)
+        except PeplinkConnectionError:
             return DeviceInfo(serial_number="unknown", model="unknown")
 
         if not isinstance(data, dict) or data.get("stat") != "ok":
@@ -530,6 +626,43 @@ class PeplinkApiClient:
             serial_number=device_obj.get("serialNumber", "unknown"),
             model=device_obj.get("model", "unknown"),
             hardware_version=device_obj.get("hardwareRevision") or device_obj.get("hardwareVersion"),
+        )
+
+    async def get_sfc_quota(self) -> SfcQuota:
+        """Fetch SpeedFusion Connect data allowance from the web-admin vars blob.
+
+        Source: /cgi-bin/MANGA/index.cgi?mode=js (the web-UI ``$.extend(window,…)``
+        variables), which is not exposed by the REST API and needs the web-admin
+        session.  Fields are pulled individually (the blob is a JS object literal,
+        not strict JSON).  Returns a default SfcQuota (has_profile=False) when the
+        endpoint is unavailable, the device has no SFC profile, or no web
+        credentials are configured.
+        """
+        try:
+            text = await self._manga_get("/cgi-bin/MANGA/index.cgi?mode=js")
+        except PeplinkConnectionError:
+            return SfcQuota()
+        if not isinstance(text, str):
+            return SfcQuota()
+
+        def _num(key: str) -> int | None:
+            m = re.search(rf'"{key}"\s*:\s*(\d+)', text)
+            return int(m.group(1)) if m else None
+
+        def _flag(key: str) -> bool:
+            return re.search(rf'"{key}"\s*:\s*true', text) is not None
+
+        def _txt(key: str) -> str | None:
+            m = re.search(rf'"{key}"\s*:\s*"([^"]*)"', text)
+            return m.group(1) if m else None
+
+        return SfcQuota(
+            has_profile=_flag("has_sfc_profile"),
+            quota_mb=_num("support_sfwan_quota_mb"),
+            expiry=_num("support_sfwan_expiry"),
+            expiry_date=_txt("support_sfwan_expiry_date"),
+            limit=_num("support_sfwan_limit"),
+            license_valid=_flag("support_sfwan_license_valid"),
         )
 
     async def get_traffic_stats(self) -> dict[int, tuple[float, float]]:
@@ -622,6 +755,16 @@ class PeplinkApiClient:
         """
         self._clear_auth_state()
         await self._ensure_connected(force=True)
+
+    async def test_web_login(self) -> bool:
+        """Validate the web-admin (MANGA) credentials.
+
+        These power the /cgi-bin/MANGA/* endpoints (SpeedFusion Connect data,
+        thermal/fan diagnostics) and are independent of the primary REST auth.
+        Returns True if a web-admin session could be established.
+        """
+        self._web_cookie = None
+        return await self._web_login()
 
 
 # ===== PARSING HELPERS =====
