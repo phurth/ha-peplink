@@ -73,7 +73,7 @@ body:
         ```yaml
         logger:
           logs:
-            custom_components.peplink: debug
+            custom_components.ha_peplink: debug
         ```
         Then paste the relevant log lines here.
       render: text
