@@ -32,9 +32,11 @@
         }
       },
       "reconfigure": {
-        "title": "Admin credentials (SpeedFusion Connect & diagnostics)",
-        "description": "Add the router's local admin username/password to enable SpeedFusion Connect data and thermal/fan diagnostics. These use the web-admin session, which token auth alone can't reach. Leave blank to remove.",
+        "title": "Reconfigure router connection",
+        "description": "Change the router URL or SSL verification, for example after switching the router's web admin to HTTPS (use https://...). The new settings are checked with the stored credentials before saving.\n\nThe local admin username/password are optional with token auth: they enable SpeedFusion Connect data and thermal/fan diagnostics, which use the web-admin session that token auth alone can't reach. Leave the password blank to keep the stored one; clear both to remove them.",
         "data": {
+          "base_url": "Router URL",
+          "verify_ssl": "Verify SSL certificate",
           "username": "Admin username",
           "password": "Admin password"
         }

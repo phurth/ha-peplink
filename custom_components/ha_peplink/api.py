@@ -49,6 +49,27 @@ class PeplinkApiError(Exception):
     """Router returned an API-level error."""
 
 
+def _redirect_error(resp: aiohttp.ClientResponse) -> PeplinkConnectionError | None:
+    """Return an error for a redirected login, or None if it wasn't redirected.
+
+    Login POSTs don't follow redirects: aiohttp re-sends a POST that got a 301/302
+    as a GET without its body, so the router never sees the credentials and the
+    real cause is lost.  The usual case is a router switched to HTTPS-only web
+    admin, which answers every http:// request with a redirect to https://.
+    """
+    if resp.status not in (301, 302, 303, 307, 308):
+        return None
+    location = resp.headers.get("Location", "")
+    hint = (
+        "; change the router URL to https:// (Reconfigure)"
+        if location.startswith("https://")
+        else ""
+    )
+    return PeplinkConnectionError(
+        f"Router redirected the login to {location or 'another URL'}{hint}"
+    )
+
+
 class PeplinkApiClient:
     """HTTP client for the Peplink Router REST API.
 
@@ -158,8 +179,14 @@ class PeplinkApiClient:
             "challenge": "challenge",   # Required by Peplink API
         }
         try:
-            async with self._session_obj().post(url, json=payload) as resp:
+            async with self._session_obj().post(
+                url, json=payload, allow_redirects=False
+            ) as resp:
                 text = await resp.text()
+
+                if err := _redirect_error(resp):
+                    self._is_connected = False
+                    raise err
 
                 if resp.status == 401:
                     self._is_connected = False
@@ -223,8 +250,14 @@ class PeplinkApiClient:
             "scope": "api",
         }
         try:
-            async with self._session_obj().post(url, json=payload) as resp:
+            async with self._session_obj().post(
+                url, json=payload, allow_redirects=False
+            ) as resp:
                 text = await resp.text()
+
+                if err := _redirect_error(resp):
+                    self._clear_auth_state()
+                    raise err
 
                 if resp.status == 401:
                     self._clear_auth_state()
@@ -354,8 +387,14 @@ class PeplinkApiClient:
         name = "bauth"
         try:
             async with self._session_obj().post(
-                url, json={"username": self._username, "password": self._password}
+                url,
+                json={"username": self._username, "password": self._password},
+                allow_redirects=False,
             ) as resp:
+                if err := _redirect_error(resp):
+                    _LOGGER.warning("Web-admin login failed: %s", err)
+                    self._web_cookie = None
+                    return False
                 for hdr in resp.headers.getall("Set-Cookie", []):
                     for part in hdr.split(";"):
                         part = part.strip()

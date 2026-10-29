@@ -226,53 +226,81 @@ class PeplinkConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Reconfigure — add/update the local admin username/password.
+        """Reconfigure — router URL, SSL verification, and admin credentials.
 
-        Token auth alone can't reach the web-admin (/cgi-bin/MANGA/*) endpoints,
-        so this lets a user add admin credentials to an existing entry (commonly
-        a token entry) to enable the SpeedFusion Connect data + thermal/fan
-        diagnostics entities, without deleting and re-adding it.
+        The URL and SSL settings are re-validated with the entry's stored
+        credentials, so a router moved to HTTPS (or a new address) can be fixed
+        without deleting and re-adding the entry.  The optional local admin
+        username/password power the web-admin (/cgi-bin/MANGA/*) endpoints behind
+        the SpeedFusion Connect data + thermal/fan diagnostics entities, which
+        token auth alone can't reach.
         """
         entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
 
         if user_input is not None:
             new_data = {**entry.data}
+            new_data[CONF_BASE_URL] = user_input[CONF_BASE_URL].strip().rstrip("/")
+            new_data[CONF_VERIFY_SSL] = user_input[CONF_VERIFY_SSL]
+            auth_mode = new_data.get(CONF_AUTH_MODE, AUTH_MODE_USERPASS)
+
             username = (user_input.get(CONF_USERNAME) or "").strip()
             password = user_input.get(CONF_PASSWORD, "")
+            # The username is pre-filled but the password isn't: a blank password
+            # with the stored username means "keep the stored credentials".
+            if username and not password and username == entry.data.get(CONF_USERNAME):
+                password = entry.data.get(CONF_PASSWORD, "")
 
-            if username:
-                client = PeplinkApiClient(
-                    base_url=new_data[CONF_BASE_URL],
-                    auth_mode=new_data.get(CONF_AUTH_MODE, AUTH_MODE_USERPASS),
-                    username=username,
-                    password=password,
-                    verify_ssl=new_data.get(CONF_VERIFY_SSL, True),
-                )
-                try:
-                    ok = await client.test_web_login()
-                except Exception:  # noqa: BLE001
-                    ok = False
-                finally:
-                    await client.close()
-                if ok:
-                    new_data[CONF_USERNAME] = username
-                    new_data[CONF_PASSWORD] = password
-                else:
+            client = PeplinkApiClient(
+                base_url=new_data[CONF_BASE_URL],
+                auth_mode=auth_mode,
+                username=username,
+                password=password,
+                client_id=new_data.get(CONF_CLIENT_ID, ""),
+                client_secret=new_data.get(CONF_CLIENT_SECRET, ""),
+                verify_ssl=new_data[CONF_VERIFY_SSL],
+            )
+            try:
+                await client.test_connection()
+                if (
+                    username
+                    and auth_mode != AUTH_MODE_USERPASS
+                    and not await client.test_web_login()
+                ):
                     errors["base"] = "invalid_admin_auth"
-            elif new_data.get(CONF_AUTH_MODE) != AUTH_MODE_USERPASS:
-                # Cleared — drop the optional admin creds (not for userpass auth,
-                # where they are the primary credential).
-                new_data.pop(CONF_USERNAME, None)
-                new_data.pop(CONF_PASSWORD, None)
+            except PeplinkAuthError:
+                errors["base"] = "invalid_auth"
+            except PeplinkConnectionError as err:
+                _LOGGER.warning("Reconfigure connection check failed: %s", err)
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected error during reconfigure validation")
+                errors["base"] = "unknown"
+            finally:
+                await client.close()
 
             if not errors:
+                if username:
+                    new_data[CONF_USERNAME] = username
+                    new_data[CONF_PASSWORD] = password
+                elif auth_mode != AUTH_MODE_USERPASS:
+                    # Cleared — drop the optional admin creds (not for userpass
+                    # auth, where they are the primary credential).
+                    new_data.pop(CONF_USERNAME, None)
+                    new_data.pop(CONF_PASSWORD, None)
                 return self.async_update_reload_and_abort(entry, data=new_data)
 
+        current = {**entry.data, **(user_input or {})}
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_BASE_URL, default=current.get(CONF_BASE_URL, "")
+                    ): str,
+                    vol.Required(
+                        CONF_VERIFY_SSL, default=current.get(CONF_VERIFY_SSL, True)
+                    ): bool,
                     vol.Optional(
                         CONF_USERNAME, default=entry.data.get(CONF_USERNAME, "")
                     ): str,
