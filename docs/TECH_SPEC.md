@@ -78,8 +78,37 @@ Primary API endpoints used by integration:
 - WAN priority updates (including disable path)
 - cellular modem reset operations
 - hardware rediscovery trigger
+- cellular band selection per SIM (actions `set_cellular_bands` / `get_cellular_bands`)
 
 Control writes route through authenticated API methods with response validation.
+
+### 7.1 Cellular band selection
+
+All calls use the REST API and work with token auth alone.
+
+- **Read:** `GET /api/config.wan.connection?id=<ids>&infoType=cellular&configType=active`.
+  `cellular.sim.<key>.bandSelection` is a list of band tokens, absent or `null` for Auto.
+  SIM keys: `1`, `2`, `remoteSim`, `fusionSim`, `speedfusionConnect5gLte`. Polled with diagnostics.
+- **Write:** `POST /api/config.wan.connection`
+  `{"action":"update","instantActive":true,"list":[{"id":<conn>,"cellular":{"sim":[{"id":<1|2|key>,"bandSelection":[...]|null}]}}]}`.
+  The router merges the update, so APN and other SIM settings are untouched. `carrierSelection` is
+  deliberately omitted: sending `null` would clear a manual carrier choice. `instantActive` applies it at
+  once and restarts the modem. Every write is read back and compared.
+- **Supported bands:** `GET /api/config.wan.connection?id=<conn>&infoType=cellular&reference=yes` returns
+  `reference.bandInfo`: `capability[]` rows `{mode, type, freq, list}` for every modem the firmware supports
+  (~350 KB, fetched once at setup) and `description[]` display names. `mode` is the modem model from
+  `status.wan.connection` (`cellular.model`); `type` the network-mode carrier (`*`, `ATT`, `TMO`, `Verizon`, ...;
+  Auto modes use `*`); `freq` the SIM's `mobileType` (`*`, `LTE`, `3G`, ...). Fallback order:
+  (type, freq) → (type, *) → (*, freq) → (*, *). A model listed only as variants (`EM9190_S1F1`) gets the
+  union of its variants, flagged inexact. Without the table, `band_capabilities.json` (from 8.6.1) is used.
+- **No-op requests:** a request equal to the current setting skips the write (`changed: false`), so it
+  doesn't restart the modem.
+- **Reconnect wait:** the modem restarts ~25–30 s after the write (BR1 Pro, 8.6.1: "Connecting..." for
+  ~15 s, new IP). After a write, status is polled every 2 s; the link counts as up when it reports
+  Connected or Standby with carrier data, after having been seen down. If no drop is seen within 60 s,
+  it is taken as up.
+- **Carrier data:** `status.wan.connection` `cellular.rat[].band[]`: the first component is the primary
+  carrier; secondary components often omit `channelWidth`, `sinr` and `rsrq`.
 
 ## 8. Reliability and Recovery
 
@@ -122,6 +151,7 @@ Recent trajectory includes:
 - setup/reload hardening
 - migration to `ha_peplink` domain naming
 - HACS/CI and repository metadata improvements
+- 1.2.0: cellular engineering data and band selection (issue #1)
 
 ## 12. Known Constraints
 

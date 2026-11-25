@@ -25,6 +25,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
+from .bands import AUTO, SIM_NAMES
 from .const import (
     CONF_ENABLE_GPS,
     CONF_ENABLE_VPN,
@@ -35,7 +36,7 @@ from .const import (
 )
 from .coordinator import PeplinkCoordinator
 from .entity import PeplinkEntity, PeplinkWanEntity
-from .models import WanConnection, WanUsage
+from .models import CellBand, WanConnection, WanUsage
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,6 +79,14 @@ async def async_setup_entry(
                 WanCarrierSensor(coordinator, entry, conn_id),
                 WanNetworkSensor(coordinator, entry, conn_id),
                 WanBandsSensor(coordinator, entry, conn_id),
+                WanPrimaryBandSensor(coordinator, entry, conn_id),
+                WanCellIdSensor(coordinator, entry, conn_id),
+                WanModemSensor(coordinator, entry, conn_id),
+                WanBandSelectionSensor(coordinator, entry, conn_id),
+            ]
+            entities += [
+                WanCarrierSignalSensor(coordinator, entry, conn_id, metric)
+                for metric in _SIGNAL_METRICS
             ]
 
     # Global diagnostic sensors
@@ -606,7 +615,12 @@ class WanNetworkSensor(PeplinkWanEntity, SensorEntity):
 
 
 class WanBandsSensor(PeplinkWanEntity, SensorEntity):
-    """Active cellular bands joined as comma-separated string. Name: '{wan.name} Bands'."""
+    """Active cellular bands joined as comma-separated string. Name: '{wan.name} Bands'.
+
+    Attributes list every carrier component (primary first) with its channel,
+    PCI, bandwidth and signal, plus the total aggregated bandwidth when every
+    component reports its width.
+    """
 
     def __init__(self, coordinator, entry, conn_id):
         super().__init__(coordinator, entry, conn_id)
@@ -625,6 +639,231 @@ class WanBandsSensor(PeplinkWanEntity, SensorEntity):
             return None
         bands = wan.cellular.bands
         return ", ".join(bands) if bands else "unavailable"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        wan = self._wan
+        if wan is None or wan.cellular is None:
+            return None
+        comps = wan.cellular.components
+        widths = [c.bandwidth_mhz for c in comps]
+        return {
+            "primary": comps[0].name if comps else None,
+            "secondary": [c.name for c in comps[1:]],
+            "components": [_component_attrs(c, i == 0) for i, c in enumerate(comps)],
+            "aggregated_bandwidth_mhz": (
+                sum(widths) if comps and all(w is not None for w in widths) else None
+            ),
+        }
+
+
+def _component_attrs(c: CellBand, primary: bool) -> dict[str, Any]:
+    return {
+        "band": c.name,
+        "primary": primary,
+        "earfcn": c.earfcn,
+        "pci": c.pci,
+        "bandwidth_mhz": c.bandwidth_mhz,
+        "rssi": c.rssi,
+        "rsrp": c.rsrp,
+        "rsrq": c.rsrq,
+        "sinr": c.sinr,
+    }
+
+
+def _primary(wan: WanConnection | None) -> CellBand | None:
+    if wan is None or wan.cellular is None or not wan.cellular.components:
+        return None
+    return wan.cellular.components[0]
+
+
+# metric key -> (label, unit)
+_SIGNAL_METRICS: dict[str, tuple[str, str]] = {
+    "rsrp": ("RSRP", "dBm"),
+    "rsrq": ("RSRQ", "dB"),
+    "sinr": ("SINR", "dB"),
+    "rssi": ("RSSI", "dBm"),
+}
+
+
+class WanCarrierSignalSensor(PeplinkWanEntity, SensorEntity):
+    """Primary-carrier RSRP / RSRQ / SINR / RSSI. Name: '{wan.name} RSRP' etc."""
+
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:signal"
+
+    def __init__(self, coordinator, entry, conn_id, metric: str):
+        super().__init__(coordinator, entry, conn_id)
+        self._metric = metric
+        self._label, self._attr_native_unit_of_measurement = _SIGNAL_METRICS[metric]
+        self._attr_unique_id = f"{entry.entry_id}_wan{conn_id}_{metric}"
+
+    @property
+    def name(self) -> str:
+        wan = self.coordinator.wan_connections.get(self._conn_id)
+        return f"{wan.name if wan else f'WAN {self._conn_id}'} {self._label}"
+
+    @property
+    def native_value(self) -> float | None:
+        primary = _primary(self._wan)
+        return getattr(primary, self._metric) if primary else None
+
+
+class WanPrimaryBandSensor(PeplinkWanEntity, SensorEntity):
+    """Primary carrier band. Name: '{wan.name} Primary Band'."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:radio-tower"
+
+    def __init__(self, coordinator, entry, conn_id):
+        super().__init__(coordinator, entry, conn_id)
+        self._attr_unique_id = f"{entry.entry_id}_wan{conn_id}_primary_band"
+
+    @property
+    def name(self) -> str:
+        wan = self.coordinator.wan_connections.get(self._conn_id)
+        return f"{wan.name} Primary Band" if wan else f"WAN {self._conn_id} Primary Band"
+
+    @property
+    def native_value(self) -> str | None:
+        primary = _primary(self._wan)
+        return primary.name if primary else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        primary = _primary(self._wan)
+        if primary is None:
+            return None
+        return {"earfcn": primary.earfcn, "pci": primary.pci, "bandwidth_mhz": primary.bandwidth_mhz}
+
+
+class WanCellIdSensor(PeplinkWanEntity, SensorEntity):
+    """Serving cell ID. Name: '{wan.name} Cell ID'."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:transmission-tower"
+
+    def __init__(self, coordinator, entry, conn_id):
+        super().__init__(coordinator, entry, conn_id)
+        self._attr_unique_id = f"{entry.entry_id}_wan{conn_id}_cell_id"
+
+    @property
+    def name(self) -> str:
+        wan = self.coordinator.wan_connections.get(self._conn_id)
+        return f"{wan.name} Cell ID" if wan else f"WAN {self._conn_id} Cell ID"
+
+    @property
+    def native_value(self) -> int | None:
+        wan = self._wan
+        return wan.cellular.cell_id if wan and wan.cellular else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        wan = self._wan
+        if wan is None or wan.cellular is None:
+            return None
+        cell = wan.cellular
+        primary = _primary(wan)
+        return {
+            "tac": cell.tac,
+            "mcc": cell.mcc,
+            "mnc": cell.mnc,
+            "pci": primary.pci if primary else None,
+            "network_mode": cell.network_mode,
+            "data_technology": cell.data_technology,
+        }
+
+
+class WanModemSensor(PeplinkWanEntity, SensorEntity):
+    """Cellular modem model. Name: '{wan.name} Modem'."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:expansion-card"
+
+    def __init__(self, coordinator, entry, conn_id):
+        super().__init__(coordinator, entry, conn_id)
+        self._attr_unique_id = f"{entry.entry_id}_wan{conn_id}_modem"
+
+    @property
+    def name(self) -> str:
+        wan = self.coordinator.wan_connections.get(self._conn_id)
+        return f"{wan.name} Modem" if wan else f"WAN {self._conn_id} Modem"
+
+    @property
+    def native_value(self) -> str | None:
+        wan = self._wan
+        return wan.cellular.modem_model if wan and wan.cellular else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        wan = self._wan
+        if wan is None or wan.cellular is None:
+            return None
+        cell = wan.cellular
+        return {
+            "manufacturer": cell.modem_manufacturer,
+            "firmware": cell.modem_firmware,
+            "hardware_revision": cell.modem_hardware,
+        }
+
+
+class WanBandSelectionSensor(PeplinkWanEntity, SensorEntity):
+    """Configured band selection of the active SIM. Name: '{wan.name} Band Selection'.
+
+    State is 'Auto' or 'Custom (N bands)'; attributes carry each SIM's setting
+    and the bands this modem supports. Target of the
+    ha_peplink.set_cellular_bands / get_cellular_bands actions.
+    """
+
+    _attr_icon = "mdi:tune-vertical"
+
+    def __init__(self, coordinator, entry, conn_id):
+        super().__init__(coordinator, entry, conn_id)
+        self._attr_unique_id = f"{entry.entry_id}_wan{conn_id}_band_selection"
+
+    @property
+    def name(self) -> str:
+        wan = self.coordinator.wan_connections.get(self._conn_id)
+        return f"{wan.name} Band Selection" if wan else f"WAN {self._conn_id} Band Selection"
+
+    def _active_key(self) -> str:
+        wan = self._wan
+        if wan and wan.cellular and wan.cellular.active_sim:
+            return wan.cellular.active_sim
+        return "1"
+
+    @property
+    def native_value(self) -> str | None:
+        cfg = self.coordinator.band_config(self._conn_id)
+        if cfg is None:
+            return None
+        key = self._active_key()
+        if key not in cfg.sims:
+            return None
+        bands = cfg.sims[key]
+        if not bands:
+            return "Auto"
+        return f"Custom ({len(bands)} band{'s' if len(bands) != 1 else ''})"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        cfg = self.coordinator.band_config(self._conn_id)
+        if cfg is None:
+            return None
+        key = self._active_key()
+        supported, exact = self.coordinator.band_support(self._conn_id, key)
+        table = self.coordinator.band_table
+        wan = self._wan
+        return {
+            "active_sim": SIM_NAMES.get(key, key),
+            "sims": {SIM_NAMES.get(k, k): (list(v) if v else AUTO) for k, v in cfg.sims.items()},
+            "supported_bands": supported,
+            "band_list_source": table.source if table and supported else None,
+            "band_list_exact": exact,
+            "modem": wan.cellular.modem_model if wan and wan.cellular else None,
+        }
 
 
 # ===== GLOBAL DIAGNOSTIC SENSORS =====

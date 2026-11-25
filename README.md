@@ -10,6 +10,8 @@ Polls the router's local REST API to provide real-time WAN status, cellular sign
 
 - **Multi-WAN monitoring**: status, IP, uptime, priority, and status LED for every WAN connection
 - **Cellular signal**: RSRP/RSRQ dBm, signal bars, carrier, network type, and band info
+- **Cellular engineering data**: primary-carrier RSRP, RSRQ, SINR and RSSI; primary band with EARFCN, PCI and channel width; every carrier-aggregation component as attributes; cell ID/TAC/MCC/MNC; modem model and firmware
+- **Cellular band selection**: read and set which bands each SIM may use (or Auto), with readback verification and an optional wait for the modem to reconnect — via the `ha_peplink.set_cellular_bands` and `ha_peplink.get_cellular_bands` actions
 - **Bandwidth**: real-time download and upload rates per WAN
 - **Data usage**: monthly usage with rollover cycle support; per-SIM usage on multi-SIM modems
 - **Carrier aggregation** binary sensor per cellular WAN
@@ -93,8 +95,13 @@ Entities are named `{Device} {Entity}` where Device = `Peplink Router ({instance
 | `{WAN} Signal dBm` | Sensor | RSRP in dBm |
 | `{WAN} Carrier` | Sensor | Carrier name |
 | `{WAN} Network Type` | Sensor | LTE / 5G / etc. |
-| `{WAN} Bands` | Sensor | Active band(s) |
+| `{WAN} Bands` | Sensor | Active band(s); attributes `primary`, `secondary`, `components` (per-carrier band, EARFCN, PCI, width, RSRP/RSRQ/SINR/RSSI) and `aggregated_bandwidth_mhz` (only when every carrier reports its width) |
 | `{WAN} Carrier Aggregation` | Binary Sensor | On when CA is active |
+| `{WAN} RSRP` / `RSRQ` / `SINR` / `RSSI` | Sensor (diag) | Primary carrier, dBm / dB |
+| `{WAN} Primary Band` | Sensor (diag) | Primary carrier band; attributes `earfcn`, `pci`, `bandwidth_mhz` |
+| `{WAN} Cell ID` | Sensor (diag) | Serving cell; attributes `tac`, `mcc`, `mnc`, `pci`, `network_mode` |
+| `{WAN} Modem` | Sensor (diag) | Modem model; attributes `manufacturer`, `firmware`, `hardware_revision` |
+| `{WAN} Band Selection` | Sensor | `Auto` or `Custom (N bands)` for the active SIM; attributes list every SIM's setting and the bands the modem supports. Target of the band actions |
 | `{WAN} Reset Modem` | Button | Restarts the cellular modem |
 
 ### Usage
@@ -131,6 +138,39 @@ Entities are named `{Device} {Entity}` where Device = `Peplink Router ({instance
 | GPS Heading | Sensor | degrees |
 | GPS Coordinates | Sensor | `lat, lon` string |
 
+## Cellular band selection
+
+Two actions work on one cellular modem at a time. Target the modem's `{WAN} Band Selection` sensor.
+
+**`ha_peplink.get_cellular_bands`** returns each SIM's current setting (`auto` or a list of bands), the bands the modem supports, display names for them, and the live carrier data:
+
+```yaml
+action: ha_peplink.get_cellular_bands
+data:
+  entity_id: sensor.peplink_router_van_cellular_1_band_selection
+response_variable: before
+```
+
+**`ha_peplink.set_cellular_bands`** sets one SIM's bands, reads the setting back to verify it, and fails if the router reports something else:
+
+```yaml
+action: ha_peplink.set_cellular_bands
+data:
+  entity_id: sensor.peplink_router_van_cellular_1_band_selection
+  sim: SIM A                 # optional; defaults to the active SIM
+  bands: [LTE_B2, LTE_B66]   # or "auto" / [] for Auto
+  wait_for_connection: 180   # optional; seconds to wait for the modem to reconnect
+response_variable: result    # previous, applied, verified, changed, link.connected, link.bands, ...
+```
+
+To restore a saved setting, pass it back: `bands: "{{ before.sims['SIM A'].bands }}"`.
+
+- **Band names** are the router's own: `LTE_B2`, `LTE_B66`, `5G_NSA_B66`, `5G_SA_B41`, `WCDMA_850`. LTE shorthand (`B12`, `12`) also works. Bands the modem doesn't support are rejected before anything is changed.
+- **Applying restarts that modem**, but not at once: on a MAX BR1 Pro the link dropped about 25–30 s after the change and was back about 15 s later. `wait_for_connection` waits for that drop and the reconnect (use 90 s or more), and the response says whether it came back (`link.connected`, `link.restart_seen`). Asking for the setting a SIM already has changes nothing and doesn't restart the modem (`changed: false`).
+- **Supported bands** come from the router's band reference table, matched to the modem model, network mode and the SIM's LTE/3G setting. If the firmware doesn't return the table (it first appears in the 8.6 API documentation), the integration uses its bundled copy, taken from firmware 8.6.1; the sensor's `band_list_source` attribute says which.
+- **Works with token (client ID/secret) authentication alone.** No admin login is needed. The API client needs read-write access.
+- Tested on a MAX BR1 Pro (EM7690) and MAX Transit Duo Pro (EM7411/EM7511) on firmware 8.6.1, LTE only. 5G modems and routers managed by InControl2 are untested.
+
 ## Troubleshooting
 
 Enable debug logging by adding to `configuration.yaml`:
@@ -138,7 +178,7 @@ Enable debug logging by adding to `configuration.yaml`:
 ```yaml
 logger:
   logs:
-    custom_components.peplink: debug
+    custom_components.ha_peplink: debug
 ```
 
 Then restart HA and check **Settings → System → Logs**.

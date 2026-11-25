@@ -20,7 +20,10 @@ from .const import (
     AUTH_MODE_USERPASS,
     TOKEN_REFRESH_SECS,
 )
+from .bands import channel_width_mhz, sim_api_id
 from .models import (
+    CellBand,
+    CellularBandConfig,
     CellularInfo,
     DeviceInfo,
     FanInfo,
@@ -531,6 +534,76 @@ class PeplinkApiClient:
         if data.get("stat") != "ok":
             raise PeplinkApiError(f"Modem reset error: {data.get('message')}")
 
+    # ===== CELLULAR BAND SELECTION (token API; also works with userpass) =====
+
+    async def get_cellular_band_config(self, conn_ids: list[int]) -> dict[int, CellularBandConfig]:
+        """GET /api/config.wan.connection?infoType=cellular — band selection per SIM.
+
+        ``bandSelection`` is absent (or null) when the SIM is on Auto.
+        """
+        ids = " ".join(str(c) for c in conn_ids)
+        data = await self._request(
+            "GET", f"/api/config.wan.connection?id={ids}&infoType=cellular&configType=active"
+        )
+        if data.get("stat") != "ok":
+            raise PeplinkApiError(f"Cellular config error: {data.get('message')}")
+        result: dict[int, CellularBandConfig] = {}
+        for key, conn in (data.get("response") or {}).items():
+            conn_id = _to_int(key)
+            if conn_id is None or not isinstance(conn, dict):
+                continue
+            sims_raw = (conn.get("cellular") or {}).get("sim") or {}
+            if not isinstance(sims_raw, dict):
+                continue
+            sims: dict[str, list[str] | None] = {}
+            mobile: dict[str, str | None] = {}
+            for sim, cfg in sims_raw.items():
+                if sim == "order" or not isinstance(cfg, dict):
+                    continue
+                bands = cfg.get("bandSelection")
+                sims[str(sim)] = [str(b) for b in bands] if isinstance(bands, list) and bands else None
+                mobile[str(sim)] = cfg.get("mobileType") or None
+            result[conn_id] = CellularBandConfig(conn_id=conn_id, sims=sims, mobile_types=mobile)
+        return result
+
+    async def get_band_reference(self, conn_id: int) -> dict | None:
+        """GET config.wan.connection with reference=yes; returns reference.bandInfo or None.
+
+        The reference object is large (~350 KB, every modem Peplink supports),
+        so callers fetch it once, not every poll. Older firmware may not return it.
+        """
+        data = await self._request(
+            "GET", f"/api/config.wan.connection?id={conn_id}&infoType=cellular&reference=yes"
+        )
+        if data.get("stat") != "ok":
+            raise PeplinkApiError(f"Band reference error: {data.get('message')}")
+        reference = (data.get("response") or {}).get("reference")
+        band_info = reference.get("bandInfo") if isinstance(reference, dict) else None
+        return band_info if isinstance(band_info, dict) else None
+
+    async def set_band_selection(self, conn_id: int, sim: str, bands: list[str] | None) -> None:
+        """POST /api/config.wan.connection — set one SIM's bands (None = Auto).
+
+        The router merges the update: only bandSelection changes. carrierSelection
+        is left out on purpose (sending null would clear a manual carrier choice).
+        instantActive applies it at once, which restarts that modem.
+        """
+        payload = {
+            "action": "update",
+            "instantActive": True,
+            "list": [
+                {
+                    "id": conn_id,
+                    "cellular": {"sim": [{"id": sim_api_id(sim), "bandSelection": bands}]},
+                }
+            ],
+        }
+        data = await self._request("POST", "/api/config.wan.connection", body=payload)
+        if data.get("stat") != "ok":
+            raise PeplinkApiError(
+                f"Router refused the band change: {data.get('message') or data.get('code') or data}"
+            )
+
     async def get_firmware_version(self) -> str:
         """GET /api/info.firmware  Port of getFirmwareVersion().
 
@@ -816,6 +889,14 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _to_float(value: Any) -> float | None:
+    """Convert to float, returning None on failure."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_conn_id_key(value: Any) -> int | None:
     """Parse WAN connection ID keys.
 
@@ -897,25 +978,35 @@ def _parse_cellular_info(data: dict) -> CellularInfo:
 
     network = data.get("networkType") or data.get("mobileType") or None
 
-    # Bands and signal metrics from rat[].band[] structure
-    bands: list[str] = []
-    rssi: int | None = None
-    rsrp: int | None = None
+    # Carrier components and signal metrics from rat[].band[]
+    components: list[CellBand] = []
     for rat in (data.get("rat") or []):
         if not isinstance(rat, dict):
             continue
         for band in (rat.get("band") or []):
-            if not isinstance(band, dict):
+            if not isinstance(band, dict) or not band.get("name"):
                 continue
-            band_name = band.get("name")
-            if band_name:
-                bands.append(band_name)
-            sig_obj = band.get("signal") or {}
-            if isinstance(sig_obj, dict):
-                if rssi is None and "rssi" in sig_obj:
-                    rssi = _to_int(sig_obj["rssi"])
-                if rsrp is None and "rsrp" in sig_obj:
-                    rsrp = _to_int(sig_obj["rsrp"])
+            sig = band.get("signal") if isinstance(band.get("signal"), dict) else {}
+            components.append(CellBand(
+                name=str(band["name"]),
+                rat=rat.get("name") or None,
+                earfcn=_to_int(band.get("channel")),
+                pci=_to_int(band.get("pci")),
+                bandwidth_mhz=channel_width_mhz(band.get("channelWidth")),
+                rssi=_to_float(sig.get("rssi")),
+                rsrp=_to_float(sig.get("rsrp")),
+                rsrq=_to_float(sig.get("rsrq")),
+                sinr=_to_float(sig.get("sinr")),
+            ))
+    bands = [c.name for c in components]
+    rssi = next((_to_int(c.rssi) for c in components if c.rssi is not None), None)
+    rsrp = next((_to_int(c.rsrp) for c in components if c.rsrp is not None), None)
+
+    sims = data.get("sim") if isinstance(data.get("sim"), dict) else {}
+    active_sim = next(
+        (str(k) for k, v in sims.items() if isinstance(v, dict) and v.get("active")), None
+    )
+    tower = data.get("cellTower") if isinstance(data.get("cellTower"), dict) else {}
 
     return CellularInfo(
         module_name=data.get("moduleName") or "Cellular Modem",
@@ -928,6 +1019,18 @@ def _parse_cellular_info(data: dict) -> CellularInfo:
         bands=bands,
         rssi_dbm=rssi,
         rsrp_dbm=rsrp,
+        components=components,
+        modem_model=data.get("model") or None,
+        modem_manufacturer=data.get("manufacturer") or None,
+        modem_firmware=data.get("firmware") or None,
+        modem_hardware=data.get("hardwareRevision") or None,
+        network_mode=data.get("networkMode") or None,
+        data_technology=data.get("dataTechnology") or None,
+        active_sim=active_sim,
+        cell_id=_to_int(tower.get("cellId")),
+        tac=_to_int(tower.get("tac")),
+        mcc=str(data["mcc"]) if data.get("mcc") not in (None, "") else None,
+        mnc=str(data["mnc"]) if data.get("mnc") not in (None, "") else None,
     )
 
 

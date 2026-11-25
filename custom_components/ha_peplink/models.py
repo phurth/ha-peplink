@@ -11,6 +11,24 @@ from dataclasses import dataclass, field
 # ===== WAN CONNECTION =====
 
 @dataclass
+class CellBand:
+    """One carrier component from status.wan.connection cellular.rat[].band[].
+
+    The first component reported is the primary carrier; the rest are secondary
+    carrier-aggregation components (which often omit channelWidth/SINR/RSRQ).
+    """
+    name: str                         # e.g. "LTE Band 66 (AWS 1700/2100 MHz)"
+    rat: str | None = None            # rat[].name, often empty on LTE
+    earfcn: int | None = None         # "channel" (EARFCN, or NR-ARFCN on 5G)
+    pci: int | None = None
+    bandwidth_mhz: float | None = None
+    rssi: float | None = None
+    rsrp: float | None = None
+    rsrq: float | None = None
+    sinr: float | None = None
+
+
+@dataclass
 class CellularInfo:
     """Cellular modem information from WAN status API."""
     module_name: str
@@ -23,6 +41,18 @@ class CellularInfo:
     bands: list[str]                  # Active band names from rat[].band[]
     rssi_dbm: int | None              # Raw RSSI from first active band
     rsrp_dbm: int | None              # Raw RSRP from first active band
+    components: list[CellBand] = field(default_factory=list)   # Primary first
+    modem_model: str | None = None    # e.g. "EM7511" (keys the band reference table)
+    modem_manufacturer: str | None = None
+    modem_firmware: str | None = None
+    modem_hardware: str | None = None
+    network_mode: str | None = None   # e.g. "Auto (AT&T)"
+    data_technology: str | None = None  # "FDD" / "TDD"
+    active_sim: str | None = None     # Config SIM key ("1", "2", ...) of the active SIM
+    cell_id: int | None = None
+    tac: int | None = None
+    mcc: str | None = None
+    mnc: str | None = None
 
 
 @dataclass
@@ -76,6 +106,14 @@ class WanUsage:
     unit: str | None
     start_date: str | None
     sim_slots: dict[int, SimSlotInfo] | None = None   # Populated for multi-SIM cellular
+
+
+@dataclass
+class CellularBandConfig:
+    """Band selection per SIM from config.wan.connection (infoType=cellular)."""
+    conn_id: int
+    sims: dict[str, list[str] | None]          # SIM key -> bandSelection (None = Auto)
+    mobile_types: dict[str, str | None] = field(default_factory=dict)  # SIM key -> LTE/3G/2G or None
 
 
 # ===== DIAGNOSTICS =====
@@ -165,6 +203,7 @@ class PeplinkData:
     vpn_profiles: dict[str, VpnProfile]                 # VPN poll (60s, opt-in)
     location: LocationInfo | None                       # GPS poll (120s, opt-in)
     sfc: SfcQuota | None = None                         # SpeedFusion Connect (diag poll, web-admin)
+    band_config: dict[int, CellularBandConfig] = field(default_factory=dict)  # Diag poll (token API)
     api_connected: bool = True
     authenticated: bool = True
     data_healthy: bool = True

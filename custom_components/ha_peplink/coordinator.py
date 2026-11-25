@@ -5,10 +5,12 @@ Mirrors PeplinkPollingManager.kt + PeplinkPlugin.kt poll logic.
 """
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import time
 from datetime import timedelta
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -16,6 +18,17 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import PeplinkApiClient, PeplinkAuthError, PeplinkConnectionError, PeplinkApiError
+from .bands import (
+    AUTO,
+    SIM_NAMES,
+    BandTable,
+    load_bundled_table,
+    parse_band_info,
+    resolve_bands,
+    same_selection,
+    sim_key,
+    supported_bands,
+)
 from .const import (
     CONF_AUTH_MODE,
     CONF_BASE_URL,
@@ -43,12 +56,38 @@ from .const import (
     WAN_TYPE_CELLULAR,
 )
 from .models import (
+    CellularBandConfig,
     PeplinkData,
     VpnProfile,
     WanConnection,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# A cellular link counts as up when it reports one of these and has carrier components.
+_LINK_UP_STATES = ("connected", "standby")
+# The modem restarts ~25-30 s after a band change is applied (BR1 Pro, fw 8.6.1) and is back
+# ~15 s later. If no drop shows within this time, the link is taken as already up.
+_RESTART_GRACE_S = 60
+_LINK_POLL_S = 2
+
+
+class BandSelectionError(Exception):
+    """Invalid band-selection request (bad SIM, unsupported band, ...)."""
+
+
+def _link_up(conn: WanConnection | None) -> bool:
+    return bool(
+        conn is not None
+        and conn.cellular is not None
+        and conn.cellular.components
+        and (conn.message or "").strip().lower() in _LINK_UP_STATES
+    )
+
+
+def _selection_out(bands: list[str] | None) -> list[str] | str:
+    """Band selection as returned by the actions: a list, or 'auto'."""
+    return list(bands) if bands else AUTO
 
 
 class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
@@ -117,6 +156,12 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
         # vpn_profiles from discovery (used to create entities at setup)
         self.vpn_profiles_at_discovery: dict[str, VpnProfile] = {}
 
+        # --- Cellular band selection ---
+        # Supported-band table: from the router at discovery, else the bundled copy.
+        self.band_table: BandTable | None = None
+        self._band_config: dict[int, CellularBandConfig] = {}
+        self._band_lock = asyncio.Lock()
+
     @staticmethod
     def _build_discovery_id_query() -> str:
         """Build the WAN ID probe list used during discovery/polling."""
@@ -167,6 +212,16 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
                 "  WAN %d: %s (%s, enabled=%s, sim_slots=%d)",
                 conn_id, conn.name, conn.wan_type, conn.enabled, conn.sim_slot_count,
             )
+
+        cellular_ids = sorted(
+            cid for cid, c in wan_connections.items() if c.wan_type == WAN_TYPE_CELLULAR
+        )
+        if cellular_ids:
+            await self._async_load_band_table(cellular_ids[0])
+            try:
+                self._band_config = await self.api.get_cellular_band_config(cellular_ids)
+            except (PeplinkAuthError, PeplinkConnectionError, PeplinkApiError) as err:
+                _LOGGER.warning("Cellular band config read failed (non-fatal): %s", err)
 
         # If VPN is enabled, also discover profiles now so entity platform can create entities
         if self._enable_vpn:
@@ -272,6 +327,7 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
             vpn_profiles=self._vpn_profiles,
             location=self._location,
             sfc=self._sfc,
+            band_config=dict(self._band_config),
             api_connected=self._api_connected,
             authenticated=self._authenticated,
             data_healthy=self._data_healthy,
@@ -326,6 +382,16 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
         except Exception as err:
             _LOGGER.warning("SFC quota poll failed: %s", err)
 
+        # Cellular band selection per SIM (token API; small response)
+        cellular_ids = sorted(
+            cid for cid, c in self.wan_connections.items() if c.wan_type == WAN_TYPE_CELLULAR
+        )
+        if cellular_ids and not self._band_lock.locked():
+            try:
+                self._band_config = await self.api.get_cellular_band_config(cellular_ids)
+            except Exception as err:
+                _LOGGER.warning("Cellular band config poll failed: %s", err)
+
         _LOGGER.debug("Diagnostics poll successful")
 
     async def _poll_vpn(self) -> None:
@@ -355,3 +421,186 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
             )
         except Exception as err:
             _LOGGER.warning("GPS poll failed: %s", err)
+
+    # ===== CELLULAR BAND SELECTION =====
+
+    async def _async_load_band_table(self, conn_id: int) -> None:
+        """Load the supported-band table: the router's own, else the bundled copy."""
+        table: BandTable | None = None
+        try:
+            table = parse_band_info(await self.api.get_band_reference(conn_id))
+        except (PeplinkAuthError, PeplinkConnectionError, PeplinkApiError) as err:
+            _LOGGER.debug("Band reference request failed: %s", err)
+        if table is None:
+            table = await self.hass.async_add_executor_job(load_bundled_table)
+            _LOGGER.info("Router returned no band reference table; using the bundled copy")
+        else:
+            _LOGGER.debug("Band reference table from router: %d modem models", len(table.capability))
+        self.band_table = table
+
+    def _live_cellular(self, conn_id: int):
+        conn = self.data.wan_connections.get(conn_id) if self.data else None
+        return conn.cellular if conn is not None else None
+
+    def band_support(self, conn_id: int, sim: str) -> tuple[list[str] | None, bool]:
+        """Supported bands for one SIM of one modem: (tokens or None, exact model match)."""
+        cell = self._live_cellular(conn_id)
+        cfg = self._band_config.get(conn_id)
+        return supported_bands(
+            self.band_table,
+            cell.modem_model if cell else None,
+            cell.network_mode if cell else None,
+            cfg.mobile_types.get(sim) if cfg else None,
+        )
+
+    def band_config(self, conn_id: int) -> CellularBandConfig | None:
+        return self._band_config.get(conn_id)
+
+    def _wan_name(self, conn_id: int) -> str:
+        conn = self.wan_connections.get(conn_id)
+        return conn.name if conn else f"WAN {conn_id}"
+
+    async def _async_read_band_config(self, conn_id: int) -> CellularBandConfig:
+        try:
+            cfg = (await self.api.get_cellular_band_config([conn_id])).get(conn_id)
+        except (PeplinkAuthError, PeplinkConnectionError, PeplinkApiError) as err:
+            raise BandSelectionError(f"Could not read the band settings: {err}") from err
+        if cfg is None or not cfg.sims:
+            raise BandSelectionError(f"{self._wan_name(conn_id)} reports no SIM band settings")
+        self._band_config[conn_id] = cfg
+        return cfg
+
+    def _sim_for(self, conn_id: int, cfg: CellularBandConfig, sim: str | None) -> str:
+        if sim is None or str(sim).strip() == "":
+            cell = self._live_cellular(conn_id)
+            key = cell.active_sim if cell and cell.active_sim else "1"
+        else:
+            try:
+                key = sim_key(sim)
+            except ValueError as err:
+                raise BandSelectionError(str(err)) from err
+        if key not in cfg.sims:
+            available = ", ".join(SIM_NAMES.get(k, k) for k in cfg.sims)
+            raise BandSelectionError(
+                f"{SIM_NAMES.get(key, key)} is not available on {self._wan_name(conn_id)} "
+                f"(available: {available})"
+            )
+        return key
+
+    async def async_get_bands(self, conn_id: int) -> dict[str, Any]:
+        """Current band selection per SIM, supported bands and live carrier data."""
+        cfg = await self._async_read_band_config(conn_id)
+        cell = self._live_cellular(conn_id)
+        sims: dict[str, Any] = {}
+        names: dict[str, str] = {}
+        exact = False
+        for key, bands in cfg.sims.items():
+            supported, exact = self.band_support(conn_id, key)
+            sims[SIM_NAMES.get(key, key)] = {
+                "bands": _selection_out(bands),
+                "supported": supported,
+            }
+            if self.band_table and supported:
+                names.update({b: self.band_table.names.get(b, b) for b in supported})
+        return {
+            "wan": self._wan_name(conn_id),
+            "conn_id": conn_id,
+            "modem": cell.modem_model if cell else None,
+            "active_sim": SIM_NAMES.get(cell.active_sim, cell.active_sim) if cell and cell.active_sim else None,
+            "band_list_source": self.band_table.source if self.band_table else None,
+            "band_list_exact": exact,
+            "sims": sims,
+            "band_names": names,
+            "carriers": [dataclasses.asdict(c) for c in cell.components] if cell else [],
+        }
+
+    async def async_set_bands(
+        self, conn_id: int, sim: str | None, bands: list[str], wait_seconds: int = 0
+    ) -> dict[str, Any]:
+        """Set one SIM's band selection, read it back, optionally wait for the link."""
+        async with self._band_lock:
+            cfg = await self._async_read_band_config(conn_id)
+            key = self._sim_for(conn_id, cfg, sim)
+            supported, _exact = self.band_support(conn_id, key)
+            try:
+                target = resolve_bands(bands, supported)
+            except ValueError as err:
+                raise BandSelectionError(str(err)) from err
+            previous = cfg.sims.get(key)
+
+            if same_selection(previous, target):
+                # Nothing to change: no write, so no modem restart to wait for.
+                return {
+                    "wan": self._wan_name(conn_id),
+                    "conn_id": conn_id,
+                    "sim": SIM_NAMES.get(key, key),
+                    "previous": _selection_out(previous),
+                    "applied": _selection_out(previous),
+                    "verified": True,
+                    "changed": False,
+                }
+
+            _LOGGER.info(
+                "%s %s: setting bands %s (was %s)",
+                self._wan_name(conn_id), SIM_NAMES.get(key, key),
+                _selection_out(target), _selection_out(previous),
+            )
+            await self.api.set_band_selection(conn_id, key, target)
+
+            readback = (await self._async_read_band_config(conn_id)).sims.get(key)
+            if not same_selection(readback, target):
+                raise BandSelectionError(
+                    f"The router accepted the change but reports {_selection_out(readback)} "
+                    f"instead of {_selection_out(target)}"
+                )
+
+        if self.data is not None:
+            self.async_set_updated_data(
+                dataclasses.replace(self.data, band_config=dict(self._band_config))
+            )
+
+        result: dict[str, Any] = {
+            "wan": self._wan_name(conn_id),
+            "conn_id": conn_id,
+            "sim": SIM_NAMES.get(key, key),
+            "previous": _selection_out(previous),
+            "applied": _selection_out(readback),
+            "verified": True,
+            "changed": True,
+        }
+        if wait_seconds > 0:
+            result["link"] = await self._async_wait_for_link(conn_id, wait_seconds)
+        return result
+
+    async def _async_wait_for_link(self, conn_id: int, timeout: int) -> dict[str, Any]:
+        """Wait for the modem to come back after a band change.
+
+        Applying bands restarts the modem, but not at once: the link drops about
+        25-30 s after the write. Waits to see it drop, then come back up (connected
+        or standby with carrier data). If no drop shows within the grace period,
+        the link is taken as already up.
+        """
+        start = time.monotonic()
+        seen_down = False
+        conn: WanConnection | None = None
+        while True:
+            try:
+                conn = (await self.api.get_wan_status(str(conn_id))).get(conn_id)
+            except (PeplinkAuthError, PeplinkConnectionError, PeplinkApiError):
+                conn = None
+            elapsed = time.monotonic() - start
+            up = _link_up(conn)
+            if not up:
+                seen_down = True
+            done = up and (seen_down or elapsed >= min(_RESTART_GRACE_S, timeout))
+            if done or elapsed >= timeout:
+                break
+            await asyncio.sleep(_LINK_POLL_S)
+        await self.async_request_refresh()
+        return {
+            "connected": up,
+            "status": conn.message if conn else None,
+            "seconds": round(time.monotonic() - start),
+            "restart_seen": seen_down,
+            "bands": [c.name for c in conn.cellular.components] if conn and conn.cellular else [],
+        }

@@ -70,5 +70,39 @@
         }
       }
     }
+  },
+  "services": {
+    "get_cellular_bands": {
+      "name": "Get cellular bands",
+      "description": "Reads each SIM's band selection on one cellular modem, the bands the modem supports and the live carrier data. Returns the result as a response.",
+      "fields": {
+        "entity_id": {
+          "name": "Band Selection sensor",
+          "description": "The modem's '<WAN> Band Selection' sensor."
+        }
+      }
+    },
+    "set_cellular_bands": {
+      "name": "Set cellular bands",
+      "description": "Sets which bands one SIM of a cellular modem may use, or returns it to Auto, then reads the setting back to verify it. Applying restarts that modem about 25-30 seconds later, so its link drops briefly. A request matching the current setting changes nothing.",
+      "fields": {
+        "entity_id": {
+          "name": "Band Selection sensor",
+          "description": "The modem's '<WAN> Band Selection' sensor."
+        },
+        "sim": {
+          "name": "SIM",
+          "description": "SIM slot to change. Defaults to the active SIM."
+        },
+        "bands": {
+          "name": "Bands",
+          "description": "Band names such as LTE_B2, LTE_B66, 5G_NSA_B66 or WCDMA_850 (LTE shorthand like B12 or 12 also works). Use 'auto' or an empty list for Auto. The Band Selection sensor lists the supported bands."
+        },
+        "wait_for_connection": {
+          "name": "Wait for connection",
+          "description": "Seconds to wait for the modem to restart and reconnect before returning (0 = don't wait; use 90 or more). The response reports whether it reconnected."
+        }
+      }
+    }
   }
 }

@@ -1,0 +1,43 @@
+get_cellular_bands:
+  fields:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          integration: ha_peplink
+          domain: sensor
+
+set_cellular_bands:
+  fields:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          integration: ha_peplink
+          domain: sensor
+    sim:
+      required: false
+      example: "SIM A"
+      selector:
+        select:
+          options:
+            - "SIM A"
+            - "SIM B"
+            - "RemoteSIM"
+            - "FusionSIM"
+            - "Peplink eSIM"
+    bands:
+      required: true
+      example: "LTE_B2, LTE_B4, LTE_B12, LTE_B66"
+      selector:
+        text:
+          multiple: true
+    wait_for_connection:
+      required: false
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 900
+          unit_of_measurement: seconds
+          mode: box
