@@ -47,6 +47,7 @@ def _coordinator(api):
     c.band_table = load_bundled_table()
     c._band_config = {}
     c._band_lock = asyncio.Lock()
+    c._earfcn_truncates = {}
     c.wan_connections = {3: _wan()}
     c.data = PeplinkData(wan_connections={3: _wan()}, wan_usage={}, diagnostics=None, device_info=None,
                          firmware_version=None, connected_devices=None, traffic_stats={},
@@ -145,3 +146,54 @@ def test_wait_does_not_trust_an_early_up(monkeypatch):
     result = asyncio.run(c._async_wait_for_link(3, 180))
     assert result["restart_seen"] is True and result["connected"] is True
     assert result["seconds"] >= 44
+
+
+def test_unknown_secondary_carrier_is_named_from_its_channel():
+    import dataclasses  # noqa: PLC0415
+
+    c = _coordinator(FakeApi())
+    wan = _wan()
+    unknown = dataclasses.replace(wan.cellular.components[1], name="Unknown", earfcn=9820)
+    wan = dataclasses.replace(
+        wan,
+        cellular=dataclasses.replace(
+            wan.cellular,
+            components=[wan.cellular.components[0], unknown],
+            bands=[wan.cellular.components[0].name, "Unknown"],
+        ),
+    )
+    out = c._label_unknown_bands({3: wan})[3].cellular
+    assert out.components[1].name == "LTE (Band 30)" and out.components[1].name_from_channel
+    assert out.components[0].name_from_channel is False
+    assert out.bands[1] == "LTE (Band 30)"
+
+
+def _with_components(wan, comps):
+    import dataclasses  # noqa: PLC0415
+
+    return dataclasses.replace(
+        wan, cellular=dataclasses.replace(wan.cellular, components=comps, bands=[x.name for x in comps])
+    )
+
+
+def test_truncated_earfcn_of_a_named_carrier_is_corrected():
+    import dataclasses  # noqa: PLC0415
+
+    c = _coordinator(FakeApi())
+    wan = _wan()
+    b66 = dataclasses.replace(wan.cellular.components[0], name="LTE Band 66 (AWS 1700/2100 MHz)", earfcn=1550)
+    out = c._label_unknown_bands({3: _with_components(wan, [b66])})[3].cellular
+    assert out.components[0].earfcn == 67086
+    assert c._earfcn_truncates[3] is True
+
+
+def test_full_earfcn_modem_names_low_unknown_carriers():
+    import dataclasses  # noqa: PLC0415
+
+    c = _coordinator(FakeApi())
+    wan = _wan()
+    b66 = dataclasses.replace(wan.cellular.components[0], name="LTE Band 66 (AWS 1700/2100 MHz)", earfcn=67036)
+    unknown = dataclasses.replace(wan.cellular.components[1], name="Unknown", earfcn=1125)
+    out = c._label_unknown_bands({3: _with_components(wan, [b66, unknown])})[3].cellular
+    assert c._earfcn_truncates[3] is False
+    assert out.components[1].name == "LTE (Band 2)" and out.components[1].name_from_channel

@@ -984,11 +984,11 @@ def _parse_cellular_info(data: dict) -> CellularInfo:
         if not isinstance(rat, dict):
             continue
         for band in (rat.get("band") or []):
-            if not isinstance(band, dict) or not band.get("name"):
+            if not isinstance(band, dict) or not (band.get("name") or band.get("channel")):
                 continue
             sig = band.get("signal") if isinstance(band.get("signal"), dict) else {}
             components.append(CellBand(
-                name=str(band["name"]),
+                name=str(band.get("name") or "Unknown"),
                 rat=rat.get("name") or None,
                 earfcn=_to_int(band.get("channel")),
                 pci=_to_int(band.get("pci")),

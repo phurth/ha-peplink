@@ -108,7 +108,16 @@ All calls use the REST API and work with token auth alone.
   Connected or Standby with carrier data, after having been seen down. If no drop is seen within 60 s,
   it is taken as up.
 - **Carrier data:** `status.wan.connection` `cellular.rat[].band[]`: the first component is the primary
-  carrier; secondary components often omit `channelWidth`, `sinr` and `rsrq`.
+  carrier; secondary components often omit `channelWidth`, `sinr` and `rsrq`, and some report `name: "Unknown"`
+  (seen on 8.5.1 for an AT&T Band 30 secondary, EARFCN 9820).
+- **Band names from channels:** `reference.bandInfo.description[]` carries each band's downlink channel range
+  (LTE EARFCN; 5G NR-ARFCN). An "Unknown" carrier is named from its channel: LTE ranges are disjoint; 5G only
+  when exactly one band matches (n77/n78, n38/n41, n2/n25 overlap). Marked `band_from_channel`.
+- **16-bit EARFCNs:** the EM7511 reports EARFCNs above 65535 modulo 65536 (Band 66 at 67086 arrives as 1550;
+  the EM7690 reports 67036 in full). For a named carrier, the reported value is corrected when only
+  value + 65536 lies in the named band. Per modem, the coordinator learns whether it truncates (a corrected value)
+  or not (a named carrier above 65535); for "Unknown" carriers on a modem that may truncate, both readings are
+  tried and the band is named only when they agree.
 
 ## 8. Reliability and Recovery
 
@@ -152,6 +161,7 @@ Recent trajectory includes:
 - migration to `ha_peplink` domain naming
 - HACS/CI and repository metadata improvements
 - 1.2.0: cellular engineering data and band selection (issue #1)
+- 1.2.1: name "Unknown" carriers from their channel; correct 16-bit-truncated EARFCNs
 
 ## 12. Known Constraints
 

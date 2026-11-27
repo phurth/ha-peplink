@@ -123,3 +123,69 @@ def test_parse_router_band_info():
     assert table.names["LTE_B2"] == "LTE (Band 2)"
     assert parse_band_info(None) is None
     assert parse_band_info({"capability": []}) is None
+
+
+from custom_components.ha_peplink.bands import band_name_from_channel, is_unknown_band_name  # noqa: E402
+
+
+def test_unknown_names():
+    assert is_unknown_band_name("Unknown") and is_unknown_band_name("") and is_unknown_band_name(None)
+    assert not is_unknown_band_name("LTE Band 30 (WCS 2300 MHz)")
+
+
+def test_lte_band_from_earfcn():
+    # The reporter's secondary carrier: EARFCN 9820 is LTE Band 30.
+    assert band_name_from_channel(TABLE, 9820) == "LTE (Band 30)"
+    assert band_name_from_channel(TABLE, 66986) == "LTE (Band 66)"
+    assert band_name_from_channel(TABLE, 5110) == "LTE (Band 12)"
+
+
+def test_5g_only_when_unambiguous():
+    # NR-ARFCN 126400 is only in n71's range. 5G ranges overlap a lot:
+    # 520110 is in n38 and n41, 650000 in n77 and n78, so those stay unnamed.
+    assert band_name_from_channel(TABLE, 126400) == "5G (Band n71)"
+    assert band_name_from_channel(TABLE, 520110) is None
+    assert band_name_from_channel(TABLE, 650000) is None
+
+
+def test_no_table_or_channel():
+    assert band_name_from_channel(None, 9820) is None
+    assert band_name_from_channel(TABLE, None) is None
+    assert band_name_from_channel(TABLE, 10_000_000) is None
+
+
+def test_router_table_keeps_channel_ranges():
+    table = parse_band_info({
+        "capability": [{"mode": "EM7511", "type": "*", "freq": "*", "list": ["LTE_B30"]}],
+        "description": [{"name": "LTE (Band 30)", "value": "LTE_B30", "channel": {"min": 9770, "max": 9869}}],
+    })
+    assert table.channels == {"LTE_B30": (9770, 9869)}
+    assert band_name_from_channel(table, 9820) == "LTE (Band 30)"
+
+
+from custom_components.ha_peplink.bands import corrected_earfcn  # noqa: E402
+
+
+def test_truncated_earfcn_makes_low_values_ambiguous():
+    # 1550 is Band 3, but 1550 + 65536 = 67086 is Band 66 (an EM7511 reports B66 that way).
+    assert band_name_from_channel(TABLE, 1550) is None
+    # 9820 + 65536 is not an LTE channel, so 9820 can only be Band 30.
+    assert band_name_from_channel(TABLE, 9820) == "LTE (Band 30)"
+
+
+def test_truncated_earfcn_is_corrected_from_the_band_name():
+    assert corrected_earfcn(TABLE, "LTE Band 66 (AWS 1700/2100 MHz)", 1550) == 67086
+    assert corrected_earfcn(TABLE, "LTE Band 66 (AMS 1700/2100 MHz)", 67036) == 67036
+    assert corrected_earfcn(TABLE, "LTE Band 3 (1800 MHz)", 1550) == 1550
+    assert corrected_earfcn(TABLE, "LTE Band 2 (1900 MHz)", 1125) == 1125
+    assert corrected_earfcn(TABLE, "Unknown", 1550) == 1550
+    assert corrected_earfcn(None, "LTE Band 66", 1550) == 1550
+
+
+def test_modem_known_to_report_full_earfcns():
+    # Ambiguous by default (Band 2, or a truncated Band 66)...
+    assert band_name_from_channel(TABLE, 1125) is None
+    # ...but a modem seen reporting full EARFCNs means 1125 is Band 2.
+    assert band_name_from_channel(TABLE, 1125, truncates=False) == "LTE (Band 2)"
+    # A modem known to truncate keeps the ambiguity.
+    assert band_name_from_channel(TABLE, 1125, truncates=True) is None

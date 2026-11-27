@@ -95,7 +95,7 @@ Entities are named `{Device} {Entity}` where Device = `Peplink Router ({instance
 | `{WAN} Signal dBm` | Sensor | RSRP in dBm |
 | `{WAN} Carrier` | Sensor | Carrier name |
 | `{WAN} Network Type` | Sensor | LTE / 5G / etc. |
-| `{WAN} Bands` | Sensor | Active band(s); attributes `primary`, `secondary`, `components` (per-carrier band, EARFCN, PCI, width, RSRP/RSRQ/SINR/RSSI) and `aggregated_bandwidth_mhz` (only when every carrier reports its width) |
+| `{WAN} Bands` | Sensor | Active band(s); attributes `primary`, `secondary`, `components` (per-carrier band, EARFCN, PCI, width, RSRP/RSRQ/SINR/RSSI) and `aggregated_bandwidth_mhz` (only when every carrier reports its width). A carrier the router reports as "Unknown" is named from its channel number using the router's band table, and flagged `band_from_channel: true` |
 | `{WAN} Carrier Aggregation` | Binary Sensor | On when CA is active |
 | `{WAN} RSRP` / `RSRQ` / `SINR` / `RSSI` | Sensor (diag) | Primary carrier, dBm / dB |
 | `{WAN} Primary Band` | Sensor (diag) | Primary carrier band; attributes `earfcn`, `pci`, `bandwidth_mhz` |
@@ -169,7 +169,8 @@ To restore a saved setting, pass it back: `bands: "{{ before.sims['SIM A'].bands
 - **Applying restarts that modem**, but not at once: on a MAX BR1 Pro the link dropped about 25–30 s after the change and was back about 15 s later. `wait_for_connection` waits for that drop and the reconnect (use 90 s or more), and the response says whether it came back (`link.connected`, `link.restart_seen`). Asking for the setting a SIM already has changes nothing and doesn't restart the modem (`changed: false`).
 - **Supported bands** come from the router's band reference table, matched to the modem model, network mode and the SIM's LTE/3G setting. If the firmware doesn't return the table (it first appears in the 8.6 API documentation), the integration uses its bundled copy, taken from firmware 8.6.1; the sensor's `band_list_source` attribute says which.
 - **Works with token (client ID/secret) authentication alone.** No admin login is needed. The API client needs read-write access.
-- Tested on a MAX BR1 Pro (EM7690) and MAX Transit Duo Pro (EM7411/EM7511) on firmware 8.6.1, LTE only. 5G modems and routers managed by InControl2 are untested.
+- Tested on a MAX BR1 Pro (EM7690) and MAX Transit Duo Pro (EM7411/EM7511) on firmware 8.6.1, and on a MAX Transit Duo (EM7511) on 8.5.1, LTE only. 5G modems and routers managed by InControl2 are untested.
+- **EARFCN on some modems:** the Sierra EM7511 reports LTE channel numbers above 65535 cut to 16 bits (Band 66's 67086 arrives as 1550). When the router names the band, the integration reports the corrected channel.
 
 ## Troubleshooting
 

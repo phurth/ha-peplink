@@ -22,6 +22,9 @@ from .bands import (
     AUTO,
     SIM_NAMES,
     BandTable,
+    band_name_from_channel,
+    corrected_earfcn,
+    is_unknown_band_name,
     load_bundled_table,
     parse_band_info,
     resolve_bands,
@@ -161,6 +164,9 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
         self.band_table: BandTable | None = None
         self._band_config: dict[int, CellularBandConfig] = {}
         self._band_lock = asyncio.Lock()
+        # Per modem: does it report LTE EARFCNs above 65535 truncated to 16 bits?
+        # Learned from carriers the router names (True/False), None until known.
+        self._earfcn_truncates: dict[int, bool] = {}
 
     @staticmethod
     def _build_discovery_id_query() -> str:
@@ -258,7 +264,7 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
                 conn_ids = " ".join(str(conn_id) for conn_id in sorted(self.wan_connections))
             else:
                 conn_ids = self._build_discovery_id_query()
-            new_wan = await self.api.get_wan_status(conn_ids)
+            new_wan = self._label_unknown_bands(await self.api.get_wan_status(conn_ids))
             self._api_connected = True
             self._authenticated = self.api.is_authenticated()
             self._data_healthy = len(new_wan) > 0
@@ -437,6 +443,47 @@ class PeplinkCoordinator(DataUpdateCoordinator[PeplinkData]):
         else:
             _LOGGER.debug("Band reference table from router: %d modem models", len(table.capability))
         self.band_table = table
+
+    def _label_unknown_bands(self, wans: dict[int, WanConnection]) -> dict[int, WanConnection]:
+        """Name "Unknown" carriers from their channel; undo 16-bit-truncated EARFCNs."""
+        if self.band_table is None:
+            return wans
+        for conn_id, conn in wans.items():
+            cell = conn.cellular
+            if cell is None or not cell.components:
+                continue
+            components = []
+            changed = False
+            # Learn from the named carriers first.
+            for comp in cell.components:
+                if is_unknown_band_name(comp.name) or comp.earfcn is None:
+                    continue
+                fixed = corrected_earfcn(self.band_table, comp.name, comp.earfcn)
+                if fixed != comp.earfcn:
+                    self._earfcn_truncates[conn_id] = True
+                elif comp.earfcn >= 65536:
+                    self._earfcn_truncates[conn_id] = False
+            truncates = self._earfcn_truncates.get(conn_id)
+            for comp in cell.components:
+                if is_unknown_band_name(comp.name):
+                    label = band_name_from_channel(self.band_table, comp.earfcn, truncates)
+                    if label:
+                        comp = dataclasses.replace(comp, name=label, name_from_channel=True)
+                        changed = True
+                else:
+                    earfcn = corrected_earfcn(self.band_table, comp.name, comp.earfcn)
+                    if earfcn != comp.earfcn:
+                        comp = dataclasses.replace(comp, earfcn=earfcn)
+                        changed = True
+                components.append(comp)
+            if changed:
+                wans[conn_id] = dataclasses.replace(
+                    conn,
+                    cellular=dataclasses.replace(
+                        cell, components=components, bands=[c.name for c in components]
+                    ),
+                )
+        return wans
 
     def _live_cellular(self, conn_id: int):
         conn = self.data.wan_connections.get(conn_id) if self.data else None

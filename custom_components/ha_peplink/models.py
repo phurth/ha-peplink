@@ -18,6 +18,7 @@ class CellBand:
     carrier-aggregation components (which often omit channelWidth/SINR/RSRQ).
     """
     name: str                         # e.g. "LTE Band 66 (AWS 1700/2100 MHz)"
+    name_from_channel: bool = False   # name derived from the channel (router said "Unknown")
     rat: str | None = None            # rat[].name, often empty on LTE
     earfcn: int | None = None         # "channel" (EARFCN, or NR-ARFCN on 5G)
     pci: int | None = None

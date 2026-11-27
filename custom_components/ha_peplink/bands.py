@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 SOURCE_ROUTER = "router"
@@ -65,6 +65,7 @@ class BandTable:
     capability: dict[str, dict[str, list[str]]]  # modem model -> "type|freq" -> tokens
     names: dict[str, str]                         # token -> display name
     source: str                                   # SOURCE_ROUTER or SOURCE_BUNDLED
+    channels: dict[str, tuple[int, int]] = field(default_factory=dict)  # token -> (min, max) DL channel
 
 
 def _squash(value: str) -> str:
@@ -89,16 +90,26 @@ def parse_band_info(band_info: object, source: str = SOURCE_ROUTER) -> BandTable
         for d in band_info.get("description") or []
         if isinstance(d, dict) and d.get("value")
     }
+    channels: dict[str, tuple[int, int]] = {}
+    for d in band_info.get("description") or []:
+        rng = d.get("channel") if isinstance(d, dict) else None
+        if isinstance(rng, dict) and isinstance(rng.get("min"), int) and isinstance(rng.get("max"), int):
+            channels[str(d["value"])] = (rng["min"], rng["max"])
     if not capability:
         return None
-    return BandTable(capability=capability, names=names, source=source)
+    return BandTable(capability=capability, names=names, source=source, channels=channels)
 
 
 def load_bundled_table() -> BandTable:
     """Load the bundled table. Blocking file I/O: run it in an executor."""
     path = Path(__file__).with_name("band_capabilities.json")
     data = json.loads(path.read_text(encoding="utf-8"))
-    return BandTable(capability=data["capability"], names=data["names"], source=SOURCE_BUNDLED)
+    return BandTable(
+        capability=data["capability"],
+        names=data["names"],
+        source=SOURCE_BUNDLED,
+        channels={k: (v[0], v[1]) for k, v in data.get("channels", {}).items()},
+    )
 
 
 def network_type(network_mode: str | None) -> str:
@@ -229,3 +240,77 @@ def channel_width_mhz(value: object) -> float | None:
         return float(value)
     m = re.search(r"(\d+(?:\.\d+)?)", str(value))
     return float(m.group(1)) if m else None
+
+_UNKNOWN_BAND_NAMES = {"", "unknown", "n/a", "-"}
+
+
+def is_unknown_band_name(name: str | None) -> bool:
+    """True when the router didn't name a carrier's band."""
+    return name is None or name.strip().lower() in _UNKNOWN_BAND_NAMES
+
+
+# Some modems (seen on a Sierra EM7511) report LTE EARFCNs above 65535 modulo
+# 65536: Band 66's 67086 arrives as 1550. A value below 65536 may therefore be
+# the low 16 bits of a larger EARFCN.
+_EARFCN_WRAP = 65536
+
+
+def _lte_band(table: BandTable, channel: int) -> str | None:
+    hits = [
+        t for t, (lo, hi) in table.channels.items()
+        if t.startswith("LTE_") and lo <= channel <= hi
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
+def band_name_from_channel(
+    table: BandTable | None, channel: int | None, truncates: bool | None = None
+) -> str | None:
+    """Name a carrier's band from its downlink channel, using the router's table.
+
+    LTE (EARFCN, below ~70,000) and 5G NR (NR-ARFCN, from 123,400) channel
+    numbers don't overlap, and LTE bands have disjoint ranges. A reported
+    EARFCN may be truncated to 16 bits, so both readings are tried, and the
+    band is named only when they agree (or only one is a valid EARFCN).
+    *truncates* is what this modem is known to do (False: it reports full
+    EARFCNs, so only the reported value is used; None: unknown). Several
+    5G bands share ranges (n77 contains n78), so a 5G name is only given when
+    exactly one band matches. Returns None when unsure.
+    """
+    if table is None or channel is None or not table.channels:
+        return None
+    readings = [channel]
+    if channel < _EARFCN_WRAP and truncates is not False:
+        readings.append(channel + _EARFCN_WRAP)
+    candidates = {b for b in (_lte_band(table, r) for r in readings) if b}
+    if len(candidates) == 1:
+        token = candidates.pop()
+        return table.names.get(token, token)
+    if candidates:
+        return None
+    matches = [t for t, (lo, hi) in table.channels.items() if lo <= channel <= hi]
+    nr_bands = {m.group(1) for t in matches if (m := re.fullmatch(r"5G_(?:NSA|SA)_B(\d+)", t))}
+    if len(nr_bands) == 1 and not any(t.startswith("LTE_") for t in matches):
+        return f"5G (Band n{nr_bands.pop()})"
+    return None
+
+
+def corrected_earfcn(table: BandTable | None, band_name: str | None, channel: int | None) -> int | None:
+    """Undo a 16-bit-truncated EARFCN when the router's band name shows the real band.
+
+    "LTE Band 66 ..." with EARFCN 1550: 1550 is outside Band 66, 1550 + 65536
+    = 67086 is inside it, so 67086 is the real channel. Anything else is
+    returned unchanged.
+    """
+    if table is None or channel is None or not band_name or channel >= _EARFCN_WRAP:
+        return channel
+    m = re.search(r"\bLTE\b.*?\bBand\s+(\d+)", band_name, re.IGNORECASE) or re.search(
+        r"\bB(\d+)\b", band_name
+    )
+    rng = table.channels.get(f"LTE_B{int(m.group(1))}") if m else None
+    if not rng:
+        return channel
+    lo, hi = rng
+    if not lo <= channel <= hi and lo <= channel + _EARFCN_WRAP <= hi:
+        return channel + _EARFCN_WRAP
+    return channel

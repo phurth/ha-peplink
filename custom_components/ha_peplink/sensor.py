@@ -660,6 +660,7 @@ class WanBandsSensor(PeplinkWanEntity, SensorEntity):
 def _component_attrs(c: CellBand, primary: bool) -> dict[str, Any]:
     return {
         "band": c.name,
+        "band_from_channel": c.name_from_channel,
         "primary": primary,
         "earfcn": c.earfcn,
         "pci": c.pci,
